@@ -1,0 +1,2 @@
+[amplifier.modules]
+loop-basic = amplifier_mod_loop_basic:mount
