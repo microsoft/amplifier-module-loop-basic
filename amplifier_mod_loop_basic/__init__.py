@@ -9,6 +9,8 @@ from typing import Optional
 from amplifier_core import HookRegistry
 from amplifier_core import HookResult
 from amplifier_core import ModuleCoordinator
+from amplifier_core.events import CONTENT_BLOCK_END
+from amplifier_core.events import CONTENT_BLOCK_START
 from amplifier_core.events import CONTEXT_POST_COMPACT
 from amplifier_core.events import CONTEXT_PRE_COMPACT
 from amplifier_core.events import PLAN_END
@@ -78,6 +80,25 @@ class BasicOrchestrator:
             await hooks.emit(
                 PROVIDER_RESPONSE, {"data": {"provider": provider_name, "usage": usage, "tool_calls": bool(tool_calls)}}
             )
+
+            # Emit content block events if present
+            content_blocks = getattr(response, "content_blocks", None)
+            if content_blocks:
+                for idx, block in enumerate(content_blocks):
+                    # Emit block start
+                    await hooks.emit(
+                        CONTENT_BLOCK_START,
+                        {
+                            "data": {
+                                "block_type": block.type.value,
+                                "block_index": idx,
+                                "metadata": getattr(block, "raw", None),
+                            }
+                        },
+                    )
+
+                    # Emit block end with complete block
+                    await hooks.emit(CONTENT_BLOCK_END, {"data": {"block_index": idx, "block": block.to_dict()}})
 
             # Handle tool calls (simple sequential)
             if tool_calls:
