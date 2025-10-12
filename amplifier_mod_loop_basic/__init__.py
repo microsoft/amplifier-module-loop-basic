@@ -40,6 +40,7 @@ class BasicOrchestrator:
         self.config = config
         self.max_iterations = int(config.get("max_iterations", 30))
         self.default_provider: str | None = config.get("default_provider")
+        self.extended_thinking = config.get("extended_thinking", False)
 
     async def execute(
         self, prompt: str, context, providers: dict[str, Any], tools: dict[str, Any], hooks: HookRegistry
@@ -58,18 +59,29 @@ class BasicOrchestrator:
                 await context.compact()
             await hooks.emit(CONTEXT_POST_COMPACT, {"data": {"messages": len(getattr(context, "messages", []))}})
 
-        # Pick provider
-        provider_name = self.default_provider or (list(providers.keys())[0] if providers else None)
-        if not provider_name:
+        # Select provider based on priority
+        provider = self._select_provider(providers)
+        if not provider:
             raise RuntimeError("No provider available")
-        provider = providers[provider_name]
+        provider_name = None
+        for name, prov in providers.items():
+            if prov is provider:
+                provider_name = name
+                break
 
         messages = getattr(context, "messages", [{"role": "user", "content": prompt}])
 
         await hooks.emit(PROVIDER_REQUEST, {"data": {"provider": provider_name, "input_count": len(messages)}})
         try:
             if hasattr(provider, "complete"):
-                response = await provider.complete(messages)
+                # Pass tools and extended_thinking if configured
+                kwargs = {}
+                if tools:
+                    kwargs["tools"] = list(tools.values())
+                # Pass extended_thinking if enabled in orchestrator config
+                if self.extended_thinking:
+                    kwargs["extended_thinking"] = True
+                response = await provider.complete(messages, **kwargs)
             else:
                 raise RuntimeError(f"Provider {provider_name} missing 'complete'")
 
@@ -83,16 +95,21 @@ class BasicOrchestrator:
 
             # Emit content block events if present
             content_blocks = getattr(response, "content_blocks", None)
+            logger.info(
+                f"Response has content_blocks: {content_blocks is not None} - count: {len(content_blocks) if content_blocks else 0}"
+            )
             if content_blocks:
+                logger.info(f"Emitting events for {len(content_blocks)} content blocks")
                 for idx, block in enumerate(content_blocks):
-                    # Emit block start
+                    logger.info(f"Emitting CONTENT_BLOCK_START for block {idx}, type: {block.type.value}")
+                    # Emit block start (without non-serializable raw object)
                     await hooks.emit(
                         CONTENT_BLOCK_START,
                         {
                             "data": {
                                 "block_type": block.type.value,
                                 "block_index": idx,
-                                "metadata": getattr(block, "raw", None),
+                                # Don't include raw metadata as it may not be JSON serializable
                             }
                         },
                     )
@@ -158,3 +175,29 @@ class BasicOrchestrator:
                 {"data": {"provider": provider_name, "error": {"type": type(e).__name__, "msg": str(e)}}},
             )
             raise
+
+    def _select_provider(self, providers: dict[str, Any]) -> Any:
+        """Select a provider based on priority."""
+        if not providers:
+            return None
+
+        # Collect providers with their priority (default priority is 100)
+        provider_list = []
+        for name, provider in providers.items():
+            # Try to get priority from provider's config or attributes
+            priority = 100  # Default priority
+            if hasattr(provider, "priority"):
+                priority = provider.priority
+            elif hasattr(provider, "config") and isinstance(provider.config, dict):
+                priority = provider.config.get("priority", 100)
+
+            provider_list.append((priority, name, provider))
+
+        # Sort by priority (lower number = higher priority)
+        provider_list.sort(key=lambda x: x[0])
+
+        # Return the highest priority provider
+        if provider_list:
+            return provider_list[0][2]
+
+        return None
