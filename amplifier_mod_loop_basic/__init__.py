@@ -1,6 +1,5 @@
 """
-Basic agent loop orchestrator module.
-Reference implementation following Claude Code's proven pattern.
+Basic orchestrator with complete event emissions (desired state).
 """
 
 import logging
@@ -10,194 +9,131 @@ from typing import Optional
 from amplifier_core import HookRegistry
 from amplifier_core import HookResult
 from amplifier_core import ModuleCoordinator
-from amplifier_core import ToolResult
+from amplifier_core.events import CONTEXT_POST_COMPACT
+from amplifier_core.events import CONTEXT_PRE_COMPACT
+from amplifier_core.events import PLAN_END
+from amplifier_core.events import PLAN_START
+from amplifier_core.events import PROMPT_COMPLETE
+from amplifier_core.events import PROMPT_SUBMIT
+from amplifier_core.events import PROVIDER_ERROR
+from amplifier_core.events import PROVIDER_REQUEST
+from amplifier_core.events import PROVIDER_RESPONSE
+from amplifier_core.events import TOOL_ERROR
+from amplifier_core.events import TOOL_POST
+from amplifier_core.events import TOOL_PRE
 
 logger = logging.getLogger(__name__)
 
 
 async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = None):
-    """
-    Mount the basic orchestrator module.
-
-    Args:
-        coordinator: Module coordinator
-        config: Optional configuration
-
-    Returns:
-        Optional cleanup function
-    """
     config = config or {}
     orchestrator = BasicOrchestrator(config)
     await coordinator.mount("orchestrator", orchestrator)
-    logger.info("Mounted BasicOrchestrator")
+    logger.info("Mounted BasicOrchestrator (desired-state)")
     return
 
 
 class BasicOrchestrator:
-    """
-    Reference implementation of the agent loop.
-    Follows Claude Code's pattern: while(tool_calls) -> execute -> feed results -> repeat
-    """
-
-    def __init__(self, config: dict[str, Any]):
-        """Initialize the orchestrator with configuration."""
+    def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
-        self.max_iterations = config.get("max_iterations", 50)
-        self.default_provider = config.get("default_provider")
+        self.max_iterations = int(config.get("max_iterations", 30))
+        self.default_provider: str | None = config.get("default_provider")
 
     async def execute(
         self, prompt: str, context, providers: dict[str, Any], tools: dict[str, Any], hooks: HookRegistry
     ) -> str:
-        """
-        Execute the agent loop with given prompt.
+        await hooks.emit(PROMPT_SUBMIT, {"data": {"prompt": prompt}})
 
-        Args:
-            prompt: User input prompt
-            context: Context manager
-            providers: Available providers
-            tools: Available tools
-            hooks: Hook registry
+        # Add user message
+        if hasattr(context, "add_message"):
+            await context.add_message({"role": "user", "content": prompt})
 
-        Returns:
-            Final response string
-        """
-        # Emit session start
-        await hooks.emit("session:start", {"prompt": prompt})
+        # Optionally compact before provider call
+        if hasattr(context, "compact") and hasattr(context, "messages"):
+            await hooks.emit(CONTEXT_PRE_COMPACT, {"data": {"messages": len(getattr(context, "messages", []))}})
+            # simple heuristic: compact if more than 50 messages
+            if len(getattr(context, "messages", [])) > 50:
+                await context.compact()
+            await hooks.emit(CONTEXT_POST_COMPACT, {"data": {"messages": len(getattr(context, "messages", []))}})
 
-        # Add user message to context
-        await context.add_message({"role": "user", "content": prompt})
+        # Pick provider
+        provider_name = self.default_provider or (list(providers.keys())[0] if providers else None)
+        if not provider_name:
+            raise RuntimeError("No provider available")
+        provider = providers[provider_name]
 
-        # Select provider
-        provider = self._select_provider(providers)
-        if not provider:
-            return "Error: No providers available"
+        messages = getattr(context, "messages", [{"role": "user", "content": prompt}])
 
-        iteration = 0
-        final_response = ""
+        await hooks.emit(PROVIDER_REQUEST, {"data": {"provider": provider_name, "input_count": len(messages)}})
+        try:
+            if hasattr(provider, "complete"):
+                response = await provider.complete(messages)
+            else:
+                raise RuntimeError(f"Provider {provider_name} missing 'complete'")
 
-        while iteration < self.max_iterations:
-            iteration += 1
+            usage = getattr(response, "usage", None)
+            content = getattr(response, "content", None)
+            tool_calls = getattr(response, "tool_calls", None)
 
-            # Get messages from context
-            messages = await context.get_messages()
-
-            # Get completion from provider
-            try:
-                # Pass tools to provider so LLM can use them
-                response = await provider.complete(messages, tools=list(tools.values()))
-            except Exception as e:
-                logger.error(f"Provider error: {e}")
-                final_response = f"Error getting response: {e}"
-                break
-
-            # Check for tool calls
-            tool_calls = provider.parse_tool_calls(response)
-
-            if not tool_calls:
-                # No tool calls - we're done
-                final_response = response.content
-                await context.add_message({"role": "assistant", "content": final_response})
-                break
-
-            # Add assistant message with tool calls to context
-            # This is required so Anthropic sees the tool_use blocks before tool_result blocks
-            await context.add_message(
-                {
-                    "role": "assistant",
-                    "content": response.content if response.content else "",
-                    "tool_calls": [{"tool": tc.tool, "arguments": tc.arguments, "id": tc.id} for tc in tool_calls],
-                }
+            await hooks.emit(
+                PROVIDER_RESPONSE, {"data": {"provider": provider_name, "usage": usage, "tool_calls": bool(tool_calls)}}
             )
 
-            # Execute tool calls
-            for tool_call in tool_calls:
-                # Get tool object first to pass to hook
-                tool = tools.get(tool_call.tool)
+            # Handle tool calls (simple sequential)
+            if tool_calls:
+                for tc in tool_calls:
+                    tool_name = getattr(tc, "tool", None) or tc.get("tool")
+                    args = getattr(tc, "arguments", None) or tc.get("arguments") or {}
+                    tool = tools.get(tool_name)
+                    await hooks.emit(TOOL_PRE, {"data": {"tool": tool_name, "args": args}})
+                    try:
+                        if not tool:
+                            raise RuntimeError(f"Tool '{tool_name}' not found")
+                        result = await tool.execute(args)
+                        # Serialize result for logging
+                        result_data = result
+                        if hasattr(result, "to_dict"):
+                            result_data = result.to_dict()
 
-                # Pre-tool hook (now includes tool object for metadata checking)
-                hook_data = {"tool": tool_call.tool, "arguments": tool_call.arguments}
-                if tool:
-                    hook_data["tool_obj"] = tool
-                hook_result = await hooks.emit("tool:pre", hook_data)
+                        await hooks.emit(
+                            TOOL_POST,
+                            {
+                                "data": {
+                                    "tool": tool_name,
+                                    "result": result_data,
+                                }
+                            },
+                        )
+                        # Attach tool result to context
+                        if hasattr(context, "add_message"):
+                            await context.add_message(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": args.get("id") if isinstance(args, dict) else None,
+                                    "content": str(
+                                        getattr(result, "data", None) or getattr(result, "text", None) or result
+                                    ),
+                                }
+                            )
+                    except Exception as te:
+                        await hooks.emit(
+                            TOOL_ERROR,
+                            {"data": {"tool": tool_name, "error": {"type": type(te).__name__, "msg": str(te)}}},
+                        )
+                        raise
 
-                if hook_result.action == "deny":
-                    # Tool denied by hook - MUST add tool_result for API compliance
-                    reason = hook_result.reason or "Tool execution denied"
-                    await context.add_message(
-                        {
-                            "role": "tool",
-                            "name": tool_call.tool,
-                            "tool_call_id": tool_call.id,
-                            "content": f"Error: {reason}",
-                        }
-                    )
-                    continue
+            # Add assistant message
+            if content and hasattr(context, "add_message"):
+                await context.add_message({"role": "assistant", "content": content})
 
-                # Check if tool exists (we already got it earlier for the hook)
-                if not tool:
-                    # Tool not found - MUST add tool_result for API compliance
-                    await context.add_message(
-                        {
-                            "role": "tool",
-                            "name": tool_call.tool,
-                            "tool_call_id": tool_call.id,
-                            "content": f"Error: Tool {tool_call.tool} not found",
-                        }
-                    )
-                    continue
+            await hooks.emit(
+                PROMPT_COMPLETE, {"data": {"response_preview": (content or "")[:200], "length": len(content or "")}}
+            )
+            return content or ""
 
-                # Execute tool
-                try:
-                    result = await tool.execute(tool_call.arguments)
-                except Exception as e:
-                    logger.error(f"Tool execution error: {e}")
-                    result = ToolResult(success=False, error={"message": str(e)})
-
-                # Post-tool hook
-                await hooks.emit(
-                    "tool:post",
-                    {
-                        "tool": tool_call.tool,
-                        "result": result.model_dump() if hasattr(result, "model_dump") else str(result),
-                    },
-                )
-
-                # Add tool result to context
-                await context.add_message(
-                    {
-                        "role": "tool",
-                        "name": tool_call.tool,
-                        "tool_call_id": tool_call.id,
-                        "content": str(result.output) if result.success else f"Error: {result.error}",
-                    }
-                )
-
-            # Check if we should compact context
-            if await context.should_compact():
-                await hooks.emit("context:pre-compact", {})
-                await context.compact()
-
-        # Emit session end
-        await hooks.emit("session:end", {"response": final_response})
-
-        return final_response
-
-    def _select_provider(self, providers: dict[str, Any]) -> Any:
-        """
-        Select a provider to use.
-
-        Args:
-            providers: Available providers
-
-        Returns:
-            Selected provider or None
-        """
-        if not providers:
-            return None
-
-        # Use configured default if available
-        if self.default_provider and self.default_provider in providers:
-            return providers[self.default_provider]
-
-        # Otherwise use first available
-        return next(iter(providers.values()))
+        except Exception as e:
+            await hooks.emit(
+                PROVIDER_ERROR,
+                {"data": {"provider": provider_name, "error": {"type": type(e).__name__, "msg": str(e)}}},
+            )
+            raise
