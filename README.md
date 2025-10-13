@@ -2,6 +2,20 @@
 
 Reference implementation of sequential agent loop orchestration.
 
+## Prerequisites
+
+- **Python 3.11+**
+- **[UV](https://github.com/astral-sh/uv)** - Fast Python package manager
+
+### Installing UV
+
+```bash
+# macOS/Linux/WSL
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 ## Purpose
 
 Provides a standard, deterministic orchestration loop for AI agents. This is the default orchestrator and serves as the reference implementation.
