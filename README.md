@@ -16,6 +16,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Windows
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
+
 ## Purpose
 
 Provides a standard, deterministic orchestration loop for AI agents. This is the default orchestrator and serves as the reference implementation.
@@ -24,7 +25,7 @@ Provides a standard, deterministic orchestration loop for AI agents. This is the
 
 **Module Type:** Orchestrator
 **Mount Point:** `orchestrators`
-**Entry Point:** `amplifier_mod_loop_basic:mount`
+**Entry Point:** `amplifier_module_loop_basic:mount`
 
 ## Behavior
 
