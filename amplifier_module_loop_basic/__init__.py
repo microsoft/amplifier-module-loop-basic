@@ -69,112 +69,152 @@ class BasicOrchestrator:
                 provider_name = name
                 break
 
-        messages = getattr(context, "messages", [{"role": "user", "content": prompt}])
+        # Agentic loop: continue until we get a text response (no tool calls)
+        iteration = 0
+        final_content = ""
 
-        await hooks.emit(PROVIDER_REQUEST, {"data": {"provider": provider_name, "input_count": len(messages)}})
-        try:
-            if hasattr(provider, "complete"):
-                # Pass tools and extended_thinking if configured
-                kwargs = {}
-                if tools:
-                    kwargs["tools"] = list(tools.values())
-                # Pass extended_thinking if enabled in orchestrator config
-                if self.extended_thinking:
-                    kwargs["extended_thinking"] = True
-                response = await provider.complete(messages, **kwargs)
-            else:
-                raise RuntimeError(f"Provider {provider_name} missing 'complete'")
+        while iteration < self.max_iterations:
+            messages = getattr(context, "messages", [{"role": "user", "content": prompt}])
 
-            usage = getattr(response, "usage", None)
-            content = getattr(response, "content", None)
-            tool_calls = getattr(response, "tool_calls", None)
+            await hooks.emit(PROVIDER_REQUEST, {"data": {"provider": provider_name, "input_count": len(messages)}})
+            try:
+                if hasattr(provider, "complete"):
+                    # Pass tools and extended_thinking if configured
+                    kwargs = {}
+                    if tools:
+                        kwargs["tools"] = list(tools.values())
+                    # Pass extended_thinking if enabled in orchestrator config
+                    if self.extended_thinking:
+                        kwargs["extended_thinking"] = True
+                    response = await provider.complete(messages, **kwargs)
+                else:
+                    raise RuntimeError(f"Provider {provider_name} missing 'complete'")
 
-            await hooks.emit(
-                PROVIDER_RESPONSE, {"data": {"provider": provider_name, "usage": usage, "tool_calls": bool(tool_calls)}}
-            )
+                usage = getattr(response, "usage", None)
+                content = getattr(response, "content", None)
+                tool_calls = getattr(response, "tool_calls", None)
 
-            # Emit content block events if present
-            content_blocks = getattr(response, "content_blocks", None)
-            logger.info(
-                f"Response has content_blocks: {content_blocks is not None} - count: {len(content_blocks) if content_blocks else 0}"
-            )
-            if content_blocks:
-                logger.info(f"Emitting events for {len(content_blocks)} content blocks")
-                for idx, block in enumerate(content_blocks):
-                    logger.info(f"Emitting CONTENT_BLOCK_START for block {idx}, type: {block.type.value}")
-                    # Emit block start (without non-serializable raw object)
-                    await hooks.emit(
-                        CONTENT_BLOCK_START,
-                        {
-                            "data": {
-                                "block_type": block.type.value,
-                                "block_index": idx,
-                                # Don't include raw metadata as it may not be JSON serializable
-                            }
-                        },
-                    )
+                await hooks.emit(
+                    PROVIDER_RESPONSE,
+                    {"data": {"provider": provider_name, "usage": usage, "tool_calls": bool(tool_calls)}},
+                )
 
-                    # Emit block end with complete block
-                    await hooks.emit(CONTENT_BLOCK_END, {"data": {"block_index": idx, "block": block.to_dict()}})
-
-            # Handle tool calls (simple sequential)
-            if tool_calls:
-                for tc in tool_calls:
-                    tool_name = getattr(tc, "tool", None) or tc.get("tool")
-                    args = getattr(tc, "arguments", None) or tc.get("arguments") or {}
-                    tool = tools.get(tool_name)
-                    await hooks.emit(TOOL_PRE, {"data": {"tool": tool_name, "args": args}})
-                    try:
-                        if not tool:
-                            raise RuntimeError(f"Tool '{tool_name}' not found")
-                        result = await tool.execute(args)
-                        # Serialize result for logging
-                        result_data = result
-                        if hasattr(result, "to_dict"):
-                            result_data = result.to_dict()
-
+                # Emit content block events if present
+                content_blocks = getattr(response, "content_blocks", None)
+                logger.info(
+                    f"Response has content_blocks: {content_blocks is not None} - count: {len(content_blocks) if content_blocks else 0}"
+                )
+                if content_blocks:
+                    logger.info(f"Emitting events for {len(content_blocks)} content blocks")
+                    for idx, block in enumerate(content_blocks):
+                        logger.info(f"Emitting CONTENT_BLOCK_START for block {idx}, type: {block.type.value}")
+                        # Emit block start (without non-serializable raw object)
                         await hooks.emit(
-                            TOOL_POST,
+                            CONTENT_BLOCK_START,
                             {
                                 "data": {
-                                    "tool": tool_name,
-                                    "result": result_data,
+                                    "block_type": block.type.value,
+                                    "block_index": idx,
+                                    # Don't include raw metadata as it may not be JSON serializable
                                 }
                             },
                         )
-                        # Attach tool result to context
-                        if hasattr(context, "add_message"):
-                            await context.add_message(
+
+                        # Emit block end with complete block
+                        await hooks.emit(CONTENT_BLOCK_END, {"data": {"block_index": idx, "block": block.to_dict()}})
+
+                # Handle tool calls (simple sequential)
+                if tool_calls:
+                    # Add assistant message with tool calls BEFORE executing them
+                    if hasattr(context, "add_message"):
+                        assistant_msg = {
+                            "role": "assistant",
+                            "content": content if content else "",
+                            "tool_calls": [
                                 {
-                                    "role": "tool",
-                                    "tool_call_id": args.get("id") if isinstance(args, dict) else None,
-                                    "content": str(
-                                        getattr(result, "data", None) or getattr(result, "text", None) or result
-                                    ),
+                                    "id": getattr(tc, "id", None) or tc.get("id"),
+                                    "tool": getattr(tc, "tool", None) or tc.get("tool"),
+                                    "arguments": getattr(tc, "arguments", None) or tc.get("arguments") or {},
                                 }
+                                for tc in tool_calls
+                            ],
+                        }
+                        await context.add_message(assistant_msg)
+
+                    # Now execute the tools
+                    for tc in tool_calls:
+                        tool_name = getattr(tc, "tool", None) or tc.get("tool")
+                        tool_call_id = getattr(tc, "id", None) or tc.get("id")
+                        args = getattr(tc, "arguments", None) or tc.get("arguments") or {}
+                        tool = tools.get(tool_name)
+                        await hooks.emit(TOOL_PRE, {"data": {"tool": tool_name, "args": args}})
+                        try:
+                            if not tool:
+                                raise RuntimeError(f"Tool '{tool_name}' not found")
+                            result = await tool.execute(args)
+                            # Serialize result for logging
+                            result_data = result
+                            if hasattr(result, "to_dict"):
+                                result_data = result.to_dict()
+
+                            await hooks.emit(
+                                TOOL_POST,
+                                {
+                                    "data": {
+                                        "tool": tool_name,
+                                        "result": result_data,
+                                    }
+                                },
                             )
-                    except Exception as te:
-                        await hooks.emit(
-                            TOOL_ERROR,
-                            {"data": {"tool": tool_name, "error": {"type": type(te).__name__, "msg": str(te)}}},
-                        )
-                        raise
+                            # Attach tool result to context
+                            if hasattr(context, "add_message"):
+                                await context.add_message(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call_id,
+                                        "content": str(
+                                            getattr(result, "data", None) or getattr(result, "text", None) or result
+                                        ),
+                                    }
+                                )
+                        except Exception as te:
+                            await hooks.emit(
+                                TOOL_ERROR,
+                                {"data": {"tool": tool_name, "error": {"type": type(te).__name__, "msg": str(te)}}},
+                            )
+                            raise
 
-            # Add assistant message
-            if content and hasattr(context, "add_message"):
-                await context.add_message({"role": "assistant", "content": content})
+                    # After executing tools, continue loop to get final response
+                    iteration += 1
+                    continue
 
-            await hooks.emit(
-                PROMPT_COMPLETE, {"data": {"response_preview": (content or "")[:200], "length": len(content or "")}}
-            )
-            return content or ""
+                # If we have content (no tool calls), we're done
+                if content:
+                    final_content = content
+                    if hasattr(context, "add_message"):
+                        await context.add_message({"role": "assistant", "content": content})
+                    break
 
-        except Exception as e:
-            await hooks.emit(
-                PROVIDER_ERROR,
-                {"data": {"provider": provider_name, "error": {"type": type(e).__name__, "msg": str(e)}}},
-            )
-            raise
+                # No content and no tool calls - this shouldn't happen but handle it
+                logger.warning("Provider returned neither content nor tool calls")
+                iteration += 1
+
+            except Exception as e:
+                await hooks.emit(
+                    PROVIDER_ERROR,
+                    {"data": {"provider": provider_name, "error": {"type": type(e).__name__, "msg": str(e)}}},
+                )
+                raise
+
+        # Check if we exceeded max iterations
+        if iteration >= self.max_iterations and not final_content:
+            logger.warning(f"Max iterations ({self.max_iterations}) reached without final response")
+
+        await hooks.emit(
+            PROMPT_COMPLETE,
+            {"data": {"response_preview": (final_content or "")[:200], "length": len(final_content or "")}},
+        )
+        return final_content
 
     def _select_provider(self, providers: dict[str, Any]) -> Any:
         """Select a provider based on priority."""
