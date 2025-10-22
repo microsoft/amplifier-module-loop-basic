@@ -23,6 +23,8 @@ from amplifier_core.events import PROVIDER_RESPONSE
 from amplifier_core.events import TOOL_ERROR
 from amplifier_core.events import TOOL_POST
 from amplifier_core.events import TOOL_PRE
+from amplifier_core.message_models import ChatRequest
+from amplifier_core.message_models import Message
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +76,26 @@ class BasicOrchestrator:
         final_content = ""
 
         while iteration < self.max_iterations:
-            messages = getattr(context, "messages", [{"role": "user", "content": prompt}])
+            # Get messages from context
+            message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
 
-            await hooks.emit(PROVIDER_REQUEST, {"data": {"provider": provider_name, "input_count": len(messages)}})
+            # Convert to ChatRequest with Message objects
+            try:
+                messages_objects = [Message(**msg) for msg in message_dicts]
+                chat_request = ChatRequest(messages=messages_objects)
+                logger.info(f"[ORCHESTRATOR] Created ChatRequest with {len(messages_objects)} messages")
+                print(f"\n{'=' * 80}")
+                print("[ORCHESTRATOR] Passing ChatRequest to provider.complete()")
+                print(f"[ORCHESTRATOR] Type: {type(chat_request)}")
+                print(f"[ORCHESTRATOR] Messages: {len(chat_request.messages)}")
+                print(f"[ORCHESTRATOR] Roles: {[m.role for m in chat_request.messages]}")
+                print(f"{'=' * 80}\n")
+            except Exception as e:
+                logger.error(f"[ORCHESTRATOR] Failed to create ChatRequest: {e}")
+                logger.error(f"[ORCHESTRATOR] Message dicts: {message_dicts}")
+                raise
+
+            await hooks.emit(PROVIDER_REQUEST, {"data": {"provider": provider_name, "input_count": len(message_dicts)}})
             try:
                 if hasattr(provider, "complete"):
                     # Pass tools and extended_thinking if configured
@@ -86,7 +105,7 @@ class BasicOrchestrator:
                     # Pass extended_thinking if enabled in orchestrator config
                     if self.extended_thinking:
                         kwargs["extended_thinking"] = True
-                    response = await provider.complete(messages, **kwargs)
+                    response = await provider.complete(chat_request, **kwargs)
                 else:
                     raise RuntimeError(f"Provider {provider_name} missing 'complete'")
 
