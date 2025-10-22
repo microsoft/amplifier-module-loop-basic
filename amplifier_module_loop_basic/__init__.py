@@ -83,16 +83,11 @@ class BasicOrchestrator:
             try:
                 messages_objects = [Message(**msg) for msg in message_dicts]
                 chat_request = ChatRequest(messages=messages_objects)
-                logger.info(f"[ORCHESTRATOR] Created ChatRequest with {len(messages_objects)} messages")
-                print(f"\n{'=' * 80}")
-                print("[ORCHESTRATOR] Passing ChatRequest to provider.complete()")
-                print(f"[ORCHESTRATOR] Type: {type(chat_request)}")
-                print(f"[ORCHESTRATOR] Messages: {len(chat_request.messages)}")
-                print(f"[ORCHESTRATOR] Roles: {[m.role for m in chat_request.messages]}")
-                print(f"{'=' * 80}\n")
+                logger.debug(f"Created ChatRequest with {len(messages_objects)} messages")
+                logger.debug(f"Message roles: {[m.role for m in chat_request.messages]}")
             except Exception as e:
-                logger.error(f"[ORCHESTRATOR] Failed to create ChatRequest: {e}")
-                logger.error(f"[ORCHESTRATOR] Message dicts: {message_dicts}")
+                logger.error(f"Failed to create ChatRequest: {e}")
+                logger.error(f"Message dicts: {message_dicts}")
                 raise
 
             await hooks.emit(PROVIDER_REQUEST, {"data": {"provider": provider_name, "input_count": len(message_dicts)}})
