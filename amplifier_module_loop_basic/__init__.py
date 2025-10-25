@@ -161,10 +161,26 @@ class BasicOrchestrator:
                         tool_call_id = getattr(tc, "id", None) or tc.get("id")
                         args = getattr(tc, "arguments", None) or tc.get("arguments") or {}
                         tool = tools.get(tool_name)
-                        await hooks.emit(TOOL_PRE, {"data": {"tool": tool_name, "args": args}})
+
+                        # Track if tool response was added to prevent orphaned tool calls
+                        response_added = False
+
                         try:
+                            await hooks.emit(TOOL_PRE, {"data": {"tool": tool_name, "args": args}})
+
                             if not tool:
+                                # Add error response before raising
+                                if hasattr(context, "add_message"):
+                                    await context.add_message(
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": tool_call_id,
+                                            "content": f"Error: Tool '{tool_name}' not found",
+                                        }
+                                    )
+                                    response_added = True
                                 raise RuntimeError(f"Tool '{tool_name}' not found")
+
                             result = await tool.execute(args)
                             # Serialize result for logging
                             result_data = result
@@ -191,12 +207,34 @@ class BasicOrchestrator:
                                         ),
                                     }
                                 )
+                                response_added = True
                         except Exception as te:
+                            # Emit error event
                             await hooks.emit(
                                 TOOL_ERROR,
                                 {"data": {"tool": tool_name, "error": {"type": type(te).__name__, "msg": str(te)}}},
                             )
-                            raise
+
+                            # Safety net: Ensure tool response is ALWAYS added to prevent orphaned tool calls
+                            if not response_added:
+                                logger.error(f"Tool {tool_name} failed without adding response, adding error response")
+                                try:
+                                    if hasattr(context, "add_message"):
+                                        await context.add_message(
+                                            {
+                                                "role": "tool",
+                                                "tool_call_id": tool_call_id,
+                                                "content": f"Error executing tool: {str(te)}",
+                                            }
+                                        )
+                                except Exception as inner_e:
+                                    # Critical failure: Even adding error response failed
+                                    logger.error(
+                                        f"Critical: Failed to add error response for tool_call_id {tool_call_id}: {inner_e}"
+                                    )
+
+                            # Don't re-raise - continue processing remaining tools
+                            logger.error(f"Tool execution failed but continuing: {te}")
 
                     # After executing tools, continue loop to get final response
                     iteration += 1
