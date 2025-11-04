@@ -29,10 +29,11 @@ Provides a standard, deterministic orchestration loop for AI agents. This is the
 
 ## Behavior
 
-- Sequential execution: one tool call at a time
-- Deterministic flow for predictability
-- Simple error handling and recovery
-- No parallel execution or streaming
+- **Parallel tool execution**: Multiple tool calls execute concurrently (assumes LLM intent)
+- Deterministic context updates: Results added in original order
+- Robust error handling: Failures return error results, never crash
+- Event correlation: `parallel_group_id` tracks related executions
+- No streaming (see loop-streaming for that)
 
 ## Configuration
 

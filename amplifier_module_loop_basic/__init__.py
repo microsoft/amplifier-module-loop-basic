@@ -137,7 +137,7 @@ class BasicOrchestrator:
                         # Emit block end with complete block
                         await hooks.emit(CONTENT_BLOCK_END, {"data": {"block_index": idx, "block": block.to_dict()}})
 
-                # Handle tool calls (simple sequential)
+                # Handle tool calls (parallel execution)
                 if tool_calls:
                     # Add assistant message with tool calls BEFORE executing them
                     if hasattr(context, "add_message"):
@@ -155,33 +155,47 @@ class BasicOrchestrator:
                         }
                         await context.add_message(assistant_msg)
 
-                    # Now execute the tools
-                    for tc in tool_calls:
+                    # Execute tools in parallel (user guidance: assume parallel intent when multiple tool calls)
+                    import asyncio
+                    import uuid
+
+                    # Generate parallel group ID for event correlation
+                    parallel_group_id = str(uuid.uuid4())
+
+                    # Create tasks for parallel execution
+                    async def execute_single_tool(tc, group_id: str):
+                        """Execute one tool, handling all errors gracefully.
+
+                        Always returns (tool_call_id, result_or_error) tuple.
+                        Never raises - errors become error results.
+                        """
                         tool_name = getattr(tc, "tool", None) or tc.get("tool")
                         tool_call_id = getattr(tc, "id", None) or tc.get("id")
                         args = getattr(tc, "arguments", None) or tc.get("arguments") or {}
                         tool = tools.get(tool_name)
 
-                        # Track if tool response was added to prevent orphaned tool calls
-                        response_added = False
-
                         try:
-                            await hooks.emit(TOOL_PRE, {"data": {"tool": tool_name, "args": args}})
+                            await hooks.emit(
+                                TOOL_PRE,
+                                {"data": {"tool": tool_name, "args": args, "parallel_group_id": group_id}},
+                            )
 
                             if not tool:
-                                # Add error response before raising
-                                if hasattr(context, "add_message"):
-                                    await context.add_message(
-                                        {
-                                            "role": "tool",
-                                            "tool_call_id": tool_call_id,
-                                            "content": f"Error: Tool '{tool_name}' not found",
+                                error_msg = f"Error: Tool '{tool_name}' not found"
+                                await hooks.emit(
+                                    TOOL_ERROR,
+                                    {
+                                        "data": {
+                                            "tool": tool_name,
+                                            "error": {"type": "RuntimeError", "msg": error_msg},
+                                            "parallel_group_id": group_id,
                                         }
-                                    )
-                                    response_added = True
-                                raise RuntimeError(f"Tool '{tool_name}' not found")
+                                    },
+                                )
+                                return (tool_call_id, error_msg)
 
                             result = await tool.execute(args)
+
                             # Serialize result for logging
                             result_data = result
                             if hasattr(result, "to_dict"):
@@ -193,48 +207,51 @@ class BasicOrchestrator:
                                     "data": {
                                         "tool": tool_name,
                                         "result": result_data,
+                                        "parallel_group_id": group_id,
                                     }
                                 },
                             )
-                            # Attach tool result to context
-                            if hasattr(context, "add_message"):
-                                await context.add_message(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call_id,
-                                        "content": str(
-                                            getattr(result, "data", None) or getattr(result, "text", None) or result
-                                        ),
-                                    }
-                                )
-                                response_added = True
+
+                            # Return success with result content
+                            result_content = str(
+                                getattr(result, "data", None) or getattr(result, "text", None) or result
+                            )
+                            return (tool_call_id, result_content)
+
                         except Exception as te:
                             # Emit error event
                             await hooks.emit(
                                 TOOL_ERROR,
-                                {"data": {"tool": tool_name, "error": {"type": type(te).__name__, "msg": str(te)}}},
+                                {
+                                    "data": {
+                                        "tool": tool_name,
+                                        "error": {"type": type(te).__name__, "msg": str(te)},
+                                        "parallel_group_id": group_id,
+                                    }
+                                },
                             )
 
-                            # Safety net: Ensure tool response is ALWAYS added to prevent orphaned tool calls
-                            if not response_added:
-                                logger.error(f"Tool {tool_name} failed without adding response, adding error response")
-                                try:
-                                    if hasattr(context, "add_message"):
-                                        await context.add_message(
-                                            {
-                                                "role": "tool",
-                                                "tool_call_id": tool_call_id,
-                                                "content": f"Error executing tool: {str(te)}",
-                                            }
-                                        )
-                                except Exception as inner_e:
-                                    # Critical failure: Even adding error response failed
-                                    logger.error(
-                                        f"Critical: Failed to add error response for tool_call_id {tool_call_id}: {inner_e}"
-                                    )
+                            # Return failure with error message (don't raise!)
+                            error_msg = f"Error executing tool: {str(te)}"
+                            logger.error(f"Tool {tool_name} failed: {te}")
+                            return (tool_call_id, error_msg)
 
-                            # Don't re-raise - continue processing remaining tools
-                            logger.error(f"Tool execution failed but continuing: {te}")
+                    # Execute all tools in parallel with asyncio.gather
+                    # return_exceptions=False because we handle exceptions inside execute_single_tool
+                    tool_results = await asyncio.gather(
+                        *[execute_single_tool(tc, parallel_group_id) for tc in tool_calls]
+                    )
+
+                    # Add all tool results to context in original order (deterministic)
+                    for tool_call_id, content in tool_results:
+                        if hasattr(context, "add_message"):
+                            await context.add_message(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call_id,
+                                    "content": content,
+                                }
+                            )
 
                     # After executing tools, continue loop to get final response
                     iteration += 1
