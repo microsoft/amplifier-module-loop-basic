@@ -13,6 +13,7 @@ from amplifier_core.events import CONTENT_BLOCK_END
 from amplifier_core.events import CONTENT_BLOCK_START
 from amplifier_core.events import CONTEXT_POST_COMPACT
 from amplifier_core.events import CONTEXT_PRE_COMPACT
+from amplifier_core.events import ORCHESTRATOR_COMPLETE
 from amplifier_core.events import PLAN_END
 from amplifier_core.events import PLAN_START
 from amplifier_core.events import PROMPT_COMPLETE
@@ -45,7 +46,13 @@ class BasicOrchestrator:
         self.extended_thinking = config.get("extended_thinking", False)
 
     async def execute(
-        self, prompt: str, context, providers: dict[str, Any], tools: dict[str, Any], hooks: HookRegistry
+        self,
+        prompt: str,
+        context,
+        providers: dict[str, Any],
+        tools: dict[str, Any],
+        hooks: HookRegistry,
+        coordinator: ModuleCoordinator | None = None,
     ) -> str:
         await hooks.emit(PROMPT_SUBMIT, {"data": {"prompt": prompt}})
 
@@ -283,6 +290,19 @@ class BasicOrchestrator:
             PROMPT_COMPLETE,
             {"data": {"response_preview": (final_content or "")[:200], "length": len(final_content or "")}},
         )
+
+        # Emit orchestrator complete event
+        await hooks.emit(
+            ORCHESTRATOR_COMPLETE,
+            {
+                "data": {
+                    "orchestrator": "loop-basic",
+                    "turn_count": iteration,
+                    "status": "success" if final_content else "incomplete",
+                }
+            },
+        )
+
         return final_content
 
     def _select_provider(self, providers: dict[str, Any]) -> Any:
