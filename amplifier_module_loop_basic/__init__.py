@@ -54,7 +54,12 @@ class BasicOrchestrator:
         hooks: HookRegistry,
         coordinator: ModuleCoordinator | None = None,
     ) -> str:
-        await hooks.emit(PROMPT_SUBMIT, {"data": {"prompt": prompt}})
+        # Emit and process prompt submit (allows hooks to inject context on session start)
+        result = await hooks.emit(PROMPT_SUBMIT, {"data": {"prompt": prompt}})
+        if coordinator:
+            result = await coordinator.process_hook_result(result, "prompt:submit", "orchestrator")
+            if result.action == "deny":
+                return f"Operation denied: {result.reason}"
 
         # Add user message
         if hasattr(context, "add_message"):
@@ -182,10 +187,23 @@ class BasicOrchestrator:
                         tool = tools.get(tool_name)
 
                         try:
-                            await hooks.emit(
+                            # Emit and process tool pre (allows hooks to block or request approval)
+                            pre_result = await hooks.emit(
                                 TOOL_PRE,
-                                {"data": {"tool": tool_name, "args": args, "parallel_group_id": group_id}},
+                                {
+                                    "data": {
+                                        "tool_name": tool_name,  # Hook-friendly field name
+                                        "tool": tool_name,  # Legacy compat
+                                        "tool_input": args,  # Hook-friendly field name
+                                        "args": args,  # Legacy compat
+                                        "parallel_group_id": group_id,
+                                    }
+                                },
                             )
+                            if coordinator:
+                                pre_result = await coordinator.process_hook_result(pre_result, "tool:pre", tool_name)
+                                if pre_result.action == "deny":
+                                    return (tool_call_id, f"Denied by hook: {pre_result.reason}")
 
                             if not tool:
                                 error_msg = f"Error: Tool '{tool_name}' not found"
@@ -208,16 +226,21 @@ class BasicOrchestrator:
                             if hasattr(result, "to_dict"):
                                 result_data = result.to_dict()
 
-                            await hooks.emit(
+                            # Emit and process tool post (allows hooks to inject feedback)
+                            post_result = await hooks.emit(
                                 TOOL_POST,
                                 {
                                     "data": {
-                                        "tool": tool_name,
+                                        "tool_name": tool_name,  # Hook-friendly field name
+                                        "tool": tool_name,  # Legacy compat
+                                        "tool_input": args,  # For hooks to know file path etc.
                                         "result": result_data,
                                         "parallel_group_id": group_id,
                                     }
                                 },
                             )
+                            if coordinator:
+                                await coordinator.process_hook_result(post_result, "tool:post", tool_name)
 
                             # Return success with result content
                             result_content = str(
