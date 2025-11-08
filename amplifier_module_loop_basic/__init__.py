@@ -55,7 +55,7 @@ class BasicOrchestrator:
         coordinator: ModuleCoordinator | None = None,
     ) -> str:
         # Emit and process prompt submit (allows hooks to inject context on session start)
-        result = await hooks.emit(PROMPT_SUBMIT, {"data": {"prompt": prompt}})
+        result = await hooks.emit(PROMPT_SUBMIT, {"prompt": prompt})
         if coordinator:
             result = await coordinator.process_hook_result(result, "prompt:submit", "orchestrator")
             if result.action == "deny":
@@ -67,11 +67,11 @@ class BasicOrchestrator:
 
         # Optionally compact before provider call
         if hasattr(context, "compact") and hasattr(context, "messages"):
-            await hooks.emit(CONTEXT_PRE_COMPACT, {"data": {"messages": len(getattr(context, "messages", []))}})
+            await hooks.emit(CONTEXT_PRE_COMPACT, {"messages": len(getattr(context, "messages", []))})
             # simple heuristic: compact if more than 50 messages
             if len(getattr(context, "messages", [])) > 50:
                 await context.compact()
-            await hooks.emit(CONTEXT_POST_COMPACT, {"data": {"messages": len(getattr(context, "messages", []))}})
+            await hooks.emit(CONTEXT_POST_COMPACT, {"messages": len(getattr(context, "messages", []))})
 
         # Select provider based on priority
         provider = self._select_provider(providers)
@@ -102,7 +102,7 @@ class BasicOrchestrator:
                 logger.error(f"Message dicts: {message_dicts}")
                 raise
 
-            await hooks.emit(PROVIDER_REQUEST, {"data": {"provider": provider_name, "input_count": len(message_dicts)}})
+            await hooks.emit(PROVIDER_REQUEST, {"provider": provider_name, "input_count": len(message_dicts)})
             try:
                 if hasattr(provider, "complete"):
                     # Pass tools and extended_thinking if configured
@@ -122,7 +122,7 @@ class BasicOrchestrator:
 
                 await hooks.emit(
                     PROVIDER_RESPONSE,
-                    {"data": {"provider": provider_name, "usage": usage, "tool_calls": bool(tool_calls)}},
+                    {"provider": provider_name, "usage": usage, "tool_calls": bool(tool_calls)},
                 )
 
                 # Emit content block events if present
@@ -138,16 +138,13 @@ class BasicOrchestrator:
                         await hooks.emit(
                             CONTENT_BLOCK_START,
                             {
-                                "data": {
-                                    "block_type": block.type.value,
-                                    "block_index": idx,
-                                    # Don't include raw metadata as it may not be JSON serializable
-                                }
+                                "block_type": block.type.value,
+                                "block_index": idx,
                             },
                         )
 
                         # Emit block end with complete block
-                        await hooks.emit(CONTENT_BLOCK_END, {"data": {"block_index": idx, "block": block.to_dict()}})
+                        await hooks.emit(CONTENT_BLOCK_END, {"block_index": idx, "block": block.to_dict()})
 
                 # Handle tool calls (parallel execution)
                 if tool_calls:
@@ -191,13 +188,9 @@ class BasicOrchestrator:
                             pre_result = await hooks.emit(
                                 TOOL_PRE,
                                 {
-                                    "data": {
-                                        "tool_name": tool_name,  # Hook-friendly field name
-                                        "tool": tool_name,  # Legacy compat
-                                        "tool_input": args,  # Hook-friendly field name
-                                        "args": args,  # Legacy compat
-                                        "parallel_group_id": group_id,
-                                    }
+                                    "tool_name": tool_name,
+                                    "tool_input": args,
+                                    "parallel_group_id": group_id,
                                 },
                             )
                             if coordinator:
@@ -210,11 +203,9 @@ class BasicOrchestrator:
                                 await hooks.emit(
                                     TOOL_ERROR,
                                     {
-                                        "data": {
-                                            "tool": tool_name,
-                                            "error": {"type": "RuntimeError", "msg": error_msg},
-                                            "parallel_group_id": group_id,
-                                        }
+                                        "tool_name": tool_name,
+                                        "error": {"type": "RuntimeError", "msg": error_msg},
+                                        "parallel_group_id": group_id,
                                     },
                                 )
                                 return (tool_call_id, error_msg)
@@ -230,13 +221,10 @@ class BasicOrchestrator:
                             post_result = await hooks.emit(
                                 TOOL_POST,
                                 {
-                                    "data": {
-                                        "tool_name": tool_name,  # Hook-friendly field name
-                                        "tool": tool_name,  # Legacy compat
-                                        "tool_input": args,  # For hooks to know file path etc.
-                                        "result": result_data,
-                                        "parallel_group_id": group_id,
-                                    }
+                                    "tool_name": tool_name,
+                                    "tool_input": args,
+                                    "result": result_data,
+                                    "parallel_group_id": group_id,
                                 },
                             )
                             if coordinator:
@@ -253,11 +241,9 @@ class BasicOrchestrator:
                             await hooks.emit(
                                 TOOL_ERROR,
                                 {
-                                    "data": {
-                                        "tool": tool_name,
-                                        "error": {"type": type(te).__name__, "msg": str(te)},
-                                        "parallel_group_id": group_id,
-                                    }
+                                    "tool_name": tool_name,
+                                    "error": {"type": type(te).__name__, "msg": str(te)},
+                                    "parallel_group_id": group_id,
                                 },
                             )
 
@@ -301,7 +287,7 @@ class BasicOrchestrator:
             except Exception as e:
                 await hooks.emit(
                     PROVIDER_ERROR,
-                    {"data": {"provider": provider_name, "error": {"type": type(e).__name__, "msg": str(e)}}},
+                    {"provider": provider_name, "error": {"type": type(e).__name__, "msg": str(e)}},
                 )
                 raise
 
@@ -311,18 +297,16 @@ class BasicOrchestrator:
 
         await hooks.emit(
             PROMPT_COMPLETE,
-            {"data": {"response_preview": (final_content or "")[:200], "length": len(final_content or "")}},
+            {"response_preview": (final_content or "")[:200], "length": len(final_content or "")},
         )
 
         # Emit orchestrator complete event
         await hooks.emit(
             ORCHESTRATOR_COMPLETE,
             {
-                "data": {
-                    "orchestrator": "loop-basic",
-                    "turn_count": iteration,
-                    "status": "success" if final_content else "incomplete",
-                }
+                "orchestrator": "loop-basic",
+                "turn_count": iteration,
+                "status": "success" if final_content else "incomplete",
             },
         )
 
