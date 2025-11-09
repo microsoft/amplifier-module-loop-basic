@@ -88,8 +88,20 @@ class BasicOrchestrator:
         final_content = ""
 
         while iteration < self.max_iterations:
-            # Get messages from context
+            # Emit provider request BEFORE getting messages (allows hook injections)
+            result = await hooks.emit(PROVIDER_REQUEST, {"provider": provider_name, "iteration": iteration})
+            if coordinator:
+                result = await coordinator.process_hook_result(result, "provider:request", "orchestrator")
+                if result.action == "deny":
+                    return f"Operation denied: {result.reason}"
+
+            # Get messages from context (includes permanent injections)
             message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
+
+            # Append ephemeral injection if present (temporary, not stored)
+            if result.action == "inject_context" and result.ephemeral and result.context_injection:
+                message_dicts = list(message_dicts)  # Copy to avoid modifying context
+                message_dicts.append({"role": result.context_injection_role, "content": result.context_injection})
 
             # Convert to ChatRequest with Message objects
             try:
@@ -101,8 +113,6 @@ class BasicOrchestrator:
                 logger.error(f"Failed to create ChatRequest: {e}")
                 logger.error(f"Message dicts: {message_dicts}")
                 raise
-
-            await hooks.emit(PROVIDER_REQUEST, {"provider": provider_name, "input_count": len(message_dicts)})
             try:
                 if hasattr(provider, "complete"):
                     # Pass tools and extended_thinking if configured
