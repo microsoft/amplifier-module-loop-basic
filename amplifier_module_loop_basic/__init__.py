@@ -41,7 +41,9 @@ async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = 
 class BasicOrchestrator:
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
-        self.max_iterations = int(config.get("max_iterations", 30))
+        # -1 means unlimited iterations (default)
+        max_iter_config = config.get("max_iterations", -1)
+        self.max_iterations = int(max_iter_config) if max_iter_config != -1 else -1
         self.default_provider: str | None = config.get("default_provider")
         self.extended_thinking = config.get("extended_thinking", False)
 
@@ -87,7 +89,7 @@ class BasicOrchestrator:
         iteration = 0
         final_content = ""
 
-        while iteration < self.max_iterations:
+        while self.max_iterations == -1 or iteration < self.max_iterations:
             # Emit provider request BEFORE getting messages (allows hook injections)
             result = await hooks.emit(PROVIDER_REQUEST, {"provider": provider_name, "iteration": iteration})
             if coordinator:
@@ -301,9 +303,60 @@ class BasicOrchestrator:
                 )
                 raise
 
-        # Check if we exceeded max iterations
-        if iteration >= self.max_iterations and not final_content:
+        # Check if we exceeded max iterations (only if not unlimited)
+        if self.max_iterations != -1 and iteration >= self.max_iterations and not final_content:
             logger.warning(f"Max iterations ({self.max_iterations}) reached without final response")
+
+            # Inject system reminder to agent before final response
+            await hooks.emit(PROVIDER_REQUEST, {"provider": provider_name, "iteration": iteration, "max_reached": True})
+            if coordinator:
+                # Inject ephemeral reminder (not stored in context)
+                await coordinator.process_hook_result(
+                    HookResult(
+                        action="inject_context",
+                        context_injection="""<system-reminder>
+You have reached the maximum number of iterations for this turn. Please provide a response to the user now, summarizing your progress and noting what remains to be done. You can continue in the next turn if needed.
+</system-reminder>""",
+                        context_injection_role="system",
+                        ephemeral=True,
+                        suppress_output=True,
+                    ),
+                    "provider:request",
+                    "orchestrator",
+                )
+
+            # Get one final response with the reminder
+            message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
+            message_dicts = list(message_dicts)
+            message_dicts.append(
+                {
+                    "role": "system",
+                    "content": """<system-reminder>
+You have reached the maximum number of iterations for this turn. Please provide a response to the user now, summarizing your progress and noting what remains to be done. You can continue in the next turn if needed.
+</system-reminder>""",
+                }
+            )
+
+            try:
+                messages_objects = [Message(**msg) for msg in message_dicts]
+                chat_request = ChatRequest(messages=messages_objects)
+
+                kwargs = {}
+                if tools:
+                    kwargs["tools"] = list(tools.values())
+                if self.extended_thinking:
+                    kwargs["extended_thinking"] = True
+
+                response = await provider.complete(chat_request, **kwargs)
+                content = getattr(response, "content", None)
+
+                if content:
+                    final_content = content
+                    if hasattr(context, "add_message"):
+                        await context.add_message({"role": "assistant", "content": content})
+
+            except Exception as e:
+                logger.error(f"Error getting final response after max iterations: {e}")
 
         await hooks.emit(
             PROMPT_COMPLETE,

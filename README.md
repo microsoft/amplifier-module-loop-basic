@@ -42,8 +42,8 @@ Provides a standard, deterministic orchestration loop for AI agents. This is the
 module = "loop-basic"
 name = "basic"
 config = {
-    max_turns = 10,  # Maximum conversation turns
-    timeout = 300    # Timeout in seconds
+    max_iterations = -1,  # Maximum iterations (-1 = unlimited, default)
+    timeout = 300         # Timeout in seconds
 }
 ```
 
