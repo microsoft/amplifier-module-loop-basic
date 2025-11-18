@@ -103,7 +103,31 @@ class BasicOrchestrator:
             # Append ephemeral injection if present (temporary, not stored)
             if result.action == "inject_context" and result.ephemeral and result.context_injection:
                 message_dicts = list(message_dicts)  # Copy to avoid modifying context
-                message_dicts.append({"role": result.context_injection_role, "content": result.context_injection})
+
+                # Check if we should append to last tool result
+                if result.append_to_last_tool_result and len(message_dicts) > 0:
+                    last_msg = message_dicts[-1]
+                    # Append to last message if it's a tool result
+                    if last_msg.get("role") == "tool":
+                        # Append to existing content
+                        original_content = last_msg.get("content", "")
+                        message_dicts[-1] = {
+                            **last_msg,
+                            "content": f"{original_content}\n\n{result.context_injection}",
+                        }
+                        logger.debug("Appended ephemeral injection to last tool result message")
+                    else:
+                        # Fall back to new message if last message isn't a tool result
+                        message_dicts.append(
+                            {"role": result.context_injection_role, "content": result.context_injection}
+                        )
+                        logger.debug(
+                            f"Last message role is '{last_msg.get('role')}', not 'tool' - "
+                            "created new message for injection"
+                        )
+                else:
+                    # Default behavior: append as new message
+                    message_dicts.append({"role": result.context_injection_role, "content": result.context_injection})
 
             # Convert to ChatRequest with Message objects
             try:
@@ -184,7 +208,7 @@ class BasicOrchestrator:
                     parallel_group_id = str(uuid.uuid4())
 
                     # Create tasks for parallel execution
-                    async def execute_single_tool(tc, group_id: str):
+                    async def execute_single_tool(tc: Any, group_id: str) -> tuple[str, str]:
                         """Execute one tool, handling all errors gracefully.
 
                         Always returns (tool_call_id, result_or_error) tuple.
