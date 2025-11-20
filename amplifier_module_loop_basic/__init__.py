@@ -26,6 +26,7 @@ from amplifier_core.events import TOOL_POST
 from amplifier_core.events import TOOL_PRE
 from amplifier_core.message_models import ChatRequest
 from amplifier_core.message_models import Message
+from amplifier_core.message_models import ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,16 @@ class BasicOrchestrator:
             # Convert to ChatRequest with Message objects
             try:
                 messages_objects = [Message(**msg) for msg in message_dicts]
-                chat_request = ChatRequest(messages=messages_objects)
+
+                # Convert tools to ToolSpec format for ChatRequest
+                tools_list = None
+                if tools:
+                    tools_list = [
+                        ToolSpec(name=t.name, description=t.description, parameters=t.input_schema)
+                        for t in tools.values()
+                    ]
+
+                chat_request = ChatRequest(messages=messages_objects, tools=tools_list)
                 logger.debug(f"Created ChatRequest with {len(messages_objects)} messages")
                 logger.debug(f"Message roles: {[m.role for m in chat_request.messages]}")
             except Exception as e:
@@ -141,11 +151,8 @@ class BasicOrchestrator:
                 raise
             try:
                 if hasattr(provider, "complete"):
-                    # Pass tools and extended_thinking if configured
-                    kwargs = {}
-                    if tools:
-                        kwargs["tools"] = list(tools.values())
                     # Pass extended_thinking if enabled in orchestrator config
+                    kwargs = {}
                     if self.extended_thinking:
                         kwargs["extended_thinking"] = True
                     response = await provider.complete(chat_request, **kwargs)
@@ -192,7 +199,7 @@ class BasicOrchestrator:
                             "tool_calls": [
                                 {
                                     "id": getattr(tc, "id", None) or tc.get("id"),
-                                    "tool": getattr(tc, "tool", None) or tc.get("tool"),
+                                    "tool": getattr(tc, "name", None) or tc.get("tool"),
                                     "arguments": getattr(tc, "arguments", None) or tc.get("arguments") or {},
                                 }
                                 for tc in tool_calls
@@ -214,7 +221,7 @@ class BasicOrchestrator:
                         Always returns (tool_call_id, result_or_error) tuple.
                         Never raises - errors become error results.
                         """
-                        tool_name = getattr(tc, "tool", None) or tc.get("tool")
+                        tool_name = getattr(tc, "name", None) or tc.get("tool")
                         tool_call_id = getattr(tc, "id", None) or tc.get("id")
                         args = getattr(tc, "arguments", None) or tc.get("arguments") or {}
                         tool = tools.get(tool_name)
@@ -363,11 +370,18 @@ You have reached the maximum number of iterations for this turn. Please provide 
 
             try:
                 messages_objects = [Message(**msg) for msg in message_dicts]
-                chat_request = ChatRequest(messages=messages_objects)
+
+                # Convert tools to ToolSpec format for ChatRequest
+                tools_list = None
+                if tools:
+                    tools_list = [
+                        ToolSpec(name=t.name, description=t.description, parameters=t.input_schema)
+                        for t in tools.values()
+                    ]
+
+                chat_request = ChatRequest(messages=messages_objects, tools=tools_list)
 
                 kwargs = {}
-                if tools:
-                    kwargs["tools"] = list(tools.values())
                 if self.extended_thinking:
                     kwargs["extended_thinking"] = True
 
