@@ -343,7 +343,17 @@ class BasicOrchestrator:
 
                 # If we have content (no tool calls), we're done
                 if content:
-                    final_content = content
+                    # Extract text from content blocks
+                    if isinstance(content, list):
+                        text_parts = []
+                        for block in content:
+                            if hasattr(block, "text"):
+                                text_parts.append(block.text)
+                            elif isinstance(block, dict) and "text" in block:
+                                text_parts.append(block["text"])
+                        final_content = "\n\n".join(text_parts) if text_parts else ""
+                    else:
+                        final_content = content
                     if hasattr(context, "add_message"):
                         # Store structured content from response.content (our Pydantic models)
                         response_content = getattr(response, "content", None)
