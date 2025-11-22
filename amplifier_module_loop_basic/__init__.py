@@ -193,18 +193,43 @@ class BasicOrchestrator:
                 if tool_calls:
                     # Add assistant message with tool calls BEFORE executing them
                     if hasattr(context, "add_message"):
-                        assistant_msg = {
-                            "role": "assistant",
-                            "content": content if content else "",
-                            "tool_calls": [
-                                {
-                                    "id": getattr(tc, "id", None) or tc.get("id"),
-                                    "tool": getattr(tc, "name", None) or tc.get("tool"),
-                                    "arguments": getattr(tc, "arguments", None) or tc.get("arguments") or {},
-                                }
-                                for tc in tool_calls
-                            ],
-                        }
+                        # Store structured content from response.content (our Pydantic models)
+                        response_content = getattr(response, "content", None)
+                        if response_content and isinstance(response_content, list):
+                            assistant_msg = {
+                                "role": "assistant",
+                                "content": [
+                                    block.model_dump() if hasattr(block, "model_dump") else block
+                                    for block in response_content
+                                ],
+                                "tool_calls": [
+                                    {
+                                        "id": getattr(tc, "id", None) or tc.get("id"),
+                                        "tool": getattr(tc, "name", None) or tc.get("tool"),
+                                        "arguments": getattr(tc, "arguments", None) or tc.get("arguments") or {},
+                                    }
+                                    for tc in tool_calls
+                                ],
+                            }
+                        else:
+                            assistant_msg = {
+                                "role": "assistant",
+                                "content": content if content else "",
+                                "tool_calls": [
+                                    {
+                                        "id": getattr(tc, "id", None) or tc.get("id"),
+                                        "tool": getattr(tc, "name", None) or tc.get("tool"),
+                                        "arguments": getattr(tc, "arguments", None) or tc.get("arguments") or {},
+                                    }
+                                    for tc in tool_calls
+                                ],
+                            }
+
+                        # Preserve provider metadata (provider-agnostic passthrough)
+                        # This enables providers to maintain state across steps (e.g., OpenAI reasoning items)
+                        if hasattr(response, "metadata") and response.metadata:
+                            assistant_msg["metadata"] = response.metadata
+
                         await context.add_message(assistant_msg)
 
                     # Execute tools in parallel (user guidance: assume parallel intent when multiple tool calls)
@@ -320,7 +345,22 @@ class BasicOrchestrator:
                 if content:
                     final_content = content
                     if hasattr(context, "add_message"):
-                        await context.add_message({"role": "assistant", "content": content})
+                        # Store structured content from response.content (our Pydantic models)
+                        response_content = getattr(response, "content", None)
+                        if response_content and isinstance(response_content, list):
+                            assistant_msg = {
+                                "role": "assistant",
+                                "content": [
+                                    block.model_dump() if hasattr(block, "model_dump") else block
+                                    for block in response_content
+                                ],
+                            }
+                        else:
+                            assistant_msg = {"role": "assistant", "content": content}
+                        # Preserve provider metadata (provider-agnostic passthrough)
+                        if hasattr(response, "metadata") and response.metadata:
+                            assistant_msg["metadata"] = response.metadata
+                        await context.add_message(assistant_msg)
                     break
 
                 # No content and no tool calls - this shouldn't happen but handle it
@@ -387,11 +427,27 @@ You have reached the maximum number of iterations for this turn. Please provide 
 
                 response = await provider.complete(chat_request, **kwargs)
                 content = getattr(response, "content", None)
+                content_blocks = getattr(response, "content_blocks", None)
 
                 if content:
                     final_content = content
                     if hasattr(context, "add_message"):
-                        await context.add_message({"role": "assistant", "content": content})
+                        # Store structured content from response.content (our Pydantic models)
+                        response_content = getattr(response, "content", None)
+                        if response_content and isinstance(response_content, list):
+                            assistant_msg = {
+                                "role": "assistant",
+                                "content": [
+                                    block.model_dump() if hasattr(block, "model_dump") else block
+                                    for block in response_content
+                                ],
+                            }
+                        else:
+                            assistant_msg = {"role": "assistant", "content": content}
+                        # Preserve provider metadata (provider-agnostic passthrough)
+                        if hasattr(response, "metadata") and response.metadata:
+                            assistant_msg["metadata"] = response.metadata
+                        await context.add_message(assistant_msg)
 
             except Exception as e:
                 logger.error(f"Error getting final response after max iterations: {e}")
