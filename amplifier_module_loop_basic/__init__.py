@@ -186,8 +186,11 @@ class BasicOrchestrator:
                             },
                         )
 
-                        # Emit block end with complete block
-                        await hooks.emit(CONTENT_BLOCK_END, {"block_index": idx, "block": block.to_dict()})
+                        # Emit block end with complete block and usage
+                        event_data = {"block_index": idx, "block": block.to_dict()}
+                        if usage:
+                            event_data["usage"] = usage.model_dump() if hasattr(usage, "model_dump") else usage
+                        await hooks.emit(CONTENT_BLOCK_END, event_data)
 
                 # Handle tool calls (parallel execution)
                 if tool_calls:
