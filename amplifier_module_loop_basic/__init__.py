@@ -174,7 +174,8 @@ class BasicOrchestrator:
                     f"Response has content_blocks: {content_blocks is not None} - count: {len(content_blocks) if content_blocks else 0}"
                 )
                 if content_blocks:
-                    logger.info(f"Emitting events for {len(content_blocks)} content blocks")
+                    total_blocks = len(content_blocks)
+                    logger.info(f"Emitting events for {total_blocks} content blocks")
                     for idx, block in enumerate(content_blocks):
                         logger.info(f"Emitting CONTENT_BLOCK_START for block {idx}, type: {block.type.value}")
                         # Emit block start (without non-serializable raw object)
@@ -183,11 +184,16 @@ class BasicOrchestrator:
                             {
                                 "block_type": block.type.value,
                                 "block_index": idx,
+                                "total_blocks": total_blocks,
                             },
                         )
 
-                        # Emit block end with complete block and usage
-                        event_data = {"block_index": idx, "block": block.to_dict()}
+                        # Emit block end with complete block, usage, and total count
+                        event_data = {
+                            "block_index": idx,
+                            "total_blocks": total_blocks,
+                            "block": block.to_dict(),
+                        }
                         if usage:
                             event_data["usage"] = usage.model_dump() if hasattr(usage, "model_dump") else usage
                         await hooks.emit(CONTENT_BLOCK_END, event_data)
