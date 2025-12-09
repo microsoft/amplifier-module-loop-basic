@@ -2,6 +2,9 @@
 Basic orchestrator with complete event emissions (desired state).
 """
 
+# Amplifier module metadata
+__amplifier_module_type__ = "orchestrator"
+
 import logging
 from typing import Any
 from typing import Optional
