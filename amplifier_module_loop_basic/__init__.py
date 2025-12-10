@@ -310,10 +310,8 @@ class BasicOrchestrator:
                             if coordinator:
                                 await coordinator.process_hook_result(post_result, "tool:post", tool_name)
 
-                            # Return success with result content
-                            result_content = str(
-                                getattr(result, "data", None) or getattr(result, "text", None) or result
-                            )
+                            # Return success with result content (JSON-serialized for dict/list)
+                            result_content = result.get_serialized_output()
                             return (tool_call_id, result_content)
 
                         except Exception as te:
