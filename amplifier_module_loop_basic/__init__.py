@@ -14,8 +14,6 @@ from amplifier_core import HookResult
 from amplifier_core import ModuleCoordinator
 from amplifier_core.events import CONTENT_BLOCK_END
 from amplifier_core.events import CONTENT_BLOCK_START
-from amplifier_core.events import CONTEXT_POST_COMPACT
-from amplifier_core.events import CONTEXT_PRE_COMPACT
 from amplifier_core.events import ORCHESTRATOR_COMPLETE
 from amplifier_core.events import PLAN_END
 from amplifier_core.events import PLAN_START
@@ -71,14 +69,6 @@ class BasicOrchestrator:
         if hasattr(context, "add_message"):
             await context.add_message({"role": "user", "content": prompt})
 
-        # Optionally compact before provider call
-        if hasattr(context, "compact") and hasattr(context, "messages"):
-            await hooks.emit(CONTEXT_PRE_COMPACT, {"messages": len(getattr(context, "messages", []))})
-            # simple heuristic: compact if more than 50 messages
-            if len(getattr(context, "messages", [])) > 50:
-                await context.compact()
-            await hooks.emit(CONTEXT_POST_COMPACT, {"messages": len(getattr(context, "messages", []))})
-
         # Select provider based on priority
         provider = self._select_provider(providers)
         if not provider:
@@ -101,8 +91,12 @@ class BasicOrchestrator:
                 if result.action == "deny":
                     return f"Operation denied: {result.reason}"
 
-            # Get messages from context (includes permanent injections)
-            message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
+            # Get messages for LLM request (context handles compaction internally)
+            if hasattr(context, "get_messages_for_request"):
+                message_dicts = await context.get_messages_for_request()
+            else:
+                # Fallback for simple contexts without the method
+                message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
 
             # Append ephemeral injection if present (temporary, not stored)
             if result.action == "inject_context" and result.ephemeral and result.context_injection:
@@ -416,8 +410,11 @@ You have reached the maximum number of iterations for this turn. Please provide 
                     "orchestrator",
                 )
 
-            # Get one final response with the reminder
-            message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
+            # Get one final response with the reminder (context handles compaction internally)
+            if hasattr(context, "get_messages_for_request"):
+                message_dicts = await context.get_messages_for_request()
+            else:
+                message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
             message_dicts = list(message_dicts)
             message_dicts.append(
                 {
