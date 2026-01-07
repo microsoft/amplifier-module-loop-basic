@@ -349,11 +349,28 @@ class BasicOrchestrator:
 
                     # Execute all tools in parallel with asyncio.gather
                     # return_exceptions=False because we handle exceptions inside execute_single_tool
-                    tool_results = await asyncio.gather(
-                        *[execute_single_tool(tc, parallel_group_id) for tc in tool_calls]
-                    )
+                    # Wrap in try/except for CancelledError to handle immediate cancellation
+                    try:
+                        tool_results = await asyncio.gather(
+                            *[execute_single_tool(tc, parallel_group_id) for tc in tool_calls]
+                        )
+                    except asyncio.CancelledError:
+                        # Immediate cancellation (second Ctrl+C) - synthesize cancelled results
+                        # for ALL tool_calls to maintain tool_use/tool_result pairing
+                        logger.info("Tool execution cancelled - synthesizing cancelled results")
+                        for tc in tool_calls:
+                            if hasattr(context, "add_message"):
+                                await context.add_message(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tc.id,
+                                        "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{tc.name}"}}',
+                                    }
+                                )
+                        # Re-raise to let the cancellation propagate
+                        raise
 
-                    # Check for immediate cancellation
+                    # Check for immediate cancellation (graceful path - tools completed)
                     if coordinator and coordinator.cancellation.is_immediate:
                         # MUST add tool results to context before returning
                         # Otherwise we leave orphaned tool_calls without matching tool_results
