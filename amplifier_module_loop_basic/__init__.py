@@ -84,6 +84,19 @@ class BasicOrchestrator:
         final_content = ""
 
         while self.max_iterations == -1 or iteration < self.max_iterations:
+            # Check for cancellation at iteration start
+            if coordinator and coordinator.cancellation.is_cancelled:
+                # Emit orchestrator complete with cancelled status
+                await hooks.emit(
+                    ORCHESTRATOR_COMPLETE,
+                    {
+                        "orchestrator": "loop-basic",
+                        "turn_count": iteration,
+                        "status": "cancelled",
+                    },
+                )
+                return final_content
+
             # Emit provider request BEFORE getting messages (allows hook injections)
             result = await hooks.emit(PROVIDER_REQUEST, {"provider": provider_name, "iteration": iteration})
             if coordinator:
@@ -258,78 +271,101 @@ class BasicOrchestrator:
                         args = getattr(tc, "arguments", None) or tc.get("arguments") or {}
                         tool = tools.get(tool_name)
 
-                        try:
-                            # Emit and process tool pre (allows hooks to block or request approval)
-                            pre_result = await hooks.emit(
-                                TOOL_PRE,
-                                {
-                                    "tool_name": tool_name,
-                                    "tool_input": args,
-                                    "parallel_group_id": group_id,
-                                },
-                            )
-                            if coordinator:
-                                pre_result = await coordinator.process_hook_result(pre_result, "tool:pre", tool_name)
-                                if pre_result.action == "deny":
-                                    return (tool_call_id, f"Denied by hook: {pre_result.reason}")
+                        # Register tool with cancellation token for visibility
+                        if coordinator:
+                            coordinator.cancellation.register_tool_start(tool_call_id, tool_name)
 
-                            if not tool:
-                                error_msg = f"Error: Tool '{tool_name}' not found"
+                        try:
+                            try:
+                                # Emit and process tool pre (allows hooks to block or request approval)
+                                pre_result = await hooks.emit(
+                                    TOOL_PRE,
+                                    {
+                                        "tool_name": tool_name,
+                                        "tool_input": args,
+                                        "parallel_group_id": group_id,
+                                    },
+                                )
+                                if coordinator:
+                                    pre_result = await coordinator.process_hook_result(pre_result, "tool:pre", tool_name)
+                                    if pre_result.action == "deny":
+                                        return (tool_call_id, f"Denied by hook: {pre_result.reason}")
+
+                                if not tool:
+                                    error_msg = f"Error: Tool '{tool_name}' not found"
+                                    await hooks.emit(
+                                        TOOL_ERROR,
+                                        {
+                                            "tool_name": tool_name,
+                                            "error": {"type": "RuntimeError", "msg": error_msg},
+                                            "parallel_group_id": group_id,
+                                        },
+                                    )
+                                    return (tool_call_id, error_msg)
+
+                                result = await tool.execute(args)
+
+                                # Serialize result for logging
+                                result_data = result
+                                if hasattr(result, "to_dict"):
+                                    result_data = result.to_dict()
+
+                                # Emit and process tool post (allows hooks to inject feedback)
+                                post_result = await hooks.emit(
+                                    TOOL_POST,
+                                    {
+                                        "tool_name": tool_name,
+                                        "tool_input": args,
+                                        "result": result_data,
+                                        "parallel_group_id": group_id,
+                                    },
+                                )
+                                if coordinator:
+                                    await coordinator.process_hook_result(post_result, "tool:post", tool_name)
+
+                                # Return success with result content (JSON-serialized for dict/list)
+                                result_content = result.get_serialized_output()
+                                return (tool_call_id, result_content)
+
+                            except Exception as te:
+                                # Emit error event
                                 await hooks.emit(
                                     TOOL_ERROR,
                                     {
                                         "tool_name": tool_name,
-                                        "error": {"type": "RuntimeError", "msg": error_msg},
+                                        "error": {"type": type(te).__name__, "msg": str(te)},
                                         "parallel_group_id": group_id,
                                     },
                                 )
+
+                                # Return failure with error message (don't raise!)
+                                error_msg = f"Error executing tool: {str(te)}"
+                                logger.error(f"Tool {tool_name} failed: {te}")
                                 return (tool_call_id, error_msg)
-
-                            result = await tool.execute(args)
-
-                            # Serialize result for logging
-                            result_data = result
-                            if hasattr(result, "to_dict"):
-                                result_data = result.to_dict()
-
-                            # Emit and process tool post (allows hooks to inject feedback)
-                            post_result = await hooks.emit(
-                                TOOL_POST,
-                                {
-                                    "tool_name": tool_name,
-                                    "tool_input": args,
-                                    "result": result_data,
-                                    "parallel_group_id": group_id,
-                                },
-                            )
+                        finally:
+                            # Unregister tool from cancellation token
                             if coordinator:
-                                await coordinator.process_hook_result(post_result, "tool:post", tool_name)
-
-                            # Return success with result content (JSON-serialized for dict/list)
-                            result_content = result.get_serialized_output()
-                            return (tool_call_id, result_content)
-
-                        except Exception as te:
-                            # Emit error event
-                            await hooks.emit(
-                                TOOL_ERROR,
-                                {
-                                    "tool_name": tool_name,
-                                    "error": {"type": type(te).__name__, "msg": str(te)},
-                                    "parallel_group_id": group_id,
-                                },
-                            )
-
-                            # Return failure with error message (don't raise!)
-                            error_msg = f"Error executing tool: {str(te)}"
-                            logger.error(f"Tool {tool_name} failed: {te}")
-                            return (tool_call_id, error_msg)
+                                coordinator.cancellation.register_tool_complete(tool_call_id)
 
                     # Execute all tools in parallel with asyncio.gather
                     # return_exceptions=False because we handle exceptions inside execute_single_tool
                     tool_results = await asyncio.gather(
                         *[execute_single_tool(tc, parallel_group_id) for tc in tool_calls]
                     )
+
+                    # Check for immediate cancellation - synthesize results for any pending tools
+                    if coordinator and coordinator.cancellation.is_immediate:
+                        # Any tools that didn't complete will have been handled by gather
+                        # Just break out of the loop
+                        await hooks.emit(
+                            ORCHESTRATOR_COMPLETE,
+                            {
+                                "orchestrator": "loop-basic",
+                                "turn_count": iteration,
+                                "status": "cancelled",
+                            },
+                        )
+                        return final_content
 
                     # Add all tool results to context in original order (deterministic)
                     for tool_call_id, content in tool_results:
