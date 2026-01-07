@@ -353,10 +353,20 @@ class BasicOrchestrator:
                         *[execute_single_tool(tc, parallel_group_id) for tc in tool_calls]
                     )
 
-                    # Check for immediate cancellation - synthesize results for any pending tools
+                    # Check for immediate cancellation
                     if coordinator and coordinator.cancellation.is_immediate:
-                        # Any tools that didn't complete will have been handled by gather
-                        # Just break out of the loop
+                        # MUST add tool results to context before returning
+                        # Otherwise we leave orphaned tool_calls without matching tool_results
+                        # which violates provider API contracts (Anthropic, OpenAI)
+                        for tool_call_id, content in tool_results:
+                            if hasattr(context, "add_message"):
+                                await context.add_message(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call_id,
+                                        "content": content,
+                                    }
+                                )
                         await hooks.emit(
                             ORCHESTRATOR_COMPLETE,
                             {
