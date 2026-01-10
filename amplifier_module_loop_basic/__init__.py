@@ -7,7 +7,6 @@ __amplifier_module_type__ = "orchestrator"
 
 import logging
 from typing import Any
-from typing import Optional
 
 from amplifier_core import HookRegistry
 from amplifier_core import HookResult
@@ -15,8 +14,6 @@ from amplifier_core import ModuleCoordinator
 from amplifier_core.events import CONTENT_BLOCK_END
 from amplifier_core.events import CONTENT_BLOCK_START
 from amplifier_core.events import ORCHESTRATOR_COMPLETE
-from amplifier_core.events import PLAN_END
-from amplifier_core.events import PLAN_START
 from amplifier_core.events import PROMPT_COMPLETE
 from amplifier_core.events import PROMPT_SUBMIT
 from amplifier_core.events import PROVIDER_ERROR
@@ -48,6 +45,8 @@ class BasicOrchestrator:
         self.max_iterations = int(max_iter_config) if max_iter_config != -1 else -1
         self.default_provider: str | None = config.get("default_provider")
         self.extended_thinking = config.get("extended_thinking", False)
+        # Store ephemeral injections from tool:post hooks for next iteration
+        self._pending_ephemeral_injections: list[dict[str, Any]] = []
 
     async def execute(
         self,
@@ -61,7 +60,9 @@ class BasicOrchestrator:
         # Emit and process prompt submit (allows hooks to inject context on session start)
         result = await hooks.emit(PROMPT_SUBMIT, {"prompt": prompt})
         if coordinator:
-            result = await coordinator.process_hook_result(result, "prompt:submit", "orchestrator")
+            result = await coordinator.process_hook_result(
+                result, "prompt:submit", "orchestrator"
+            )
             if result.action == "deny":
                 return f"Operation denied: {result.reason}"
 
@@ -98,22 +99,34 @@ class BasicOrchestrator:
                 return final_content
 
             # Emit provider request BEFORE getting messages (allows hook injections)
-            result = await hooks.emit(PROVIDER_REQUEST, {"provider": provider_name, "iteration": iteration})
+            result = await hooks.emit(
+                PROVIDER_REQUEST, {"provider": provider_name, "iteration": iteration}
+            )
             if coordinator:
-                result = await coordinator.process_hook_result(result, "provider:request", "orchestrator")
+                result = await coordinator.process_hook_result(
+                    result, "provider:request", "orchestrator"
+                )
                 if result.action == "deny":
                     return f"Operation denied: {result.reason}"
 
             # Get messages for LLM request (context handles compaction internally)
             # Pass provider for dynamic budget calculation based on model's context window
             if hasattr(context, "get_messages_for_request"):
-                message_dicts = await context.get_messages_for_request(provider=provider)
+                message_dicts = await context.get_messages_for_request(
+                    provider=provider
+                )
             else:
                 # Fallback for simple contexts without the method
-                message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
+                message_dicts = getattr(
+                    context, "messages", [{"role": "user", "content": prompt}]
+                )
 
             # Append ephemeral injection if present (temporary, not stored)
-            if result.action == "inject_context" and result.ephemeral and result.context_injection:
+            if (
+                result.action == "inject_context"
+                and result.ephemeral
+                and result.context_injection
+            ):
                 message_dicts = list(message_dicts)  # Copy to avoid modifying context
 
                 # Check if we should append to last tool result
@@ -127,11 +140,16 @@ class BasicOrchestrator:
                             **last_msg,
                             "content": f"{original_content}\n\n{result.context_injection}",
                         }
-                        logger.debug("Appended ephemeral injection to last tool result message")
+                        logger.debug(
+                            "Appended ephemeral injection to last tool result message"
+                        )
                     else:
                         # Fall back to new message if last message isn't a tool result
                         message_dicts.append(
-                            {"role": result.context_injection_role, "content": result.context_injection}
+                            {
+                                "role": result.context_injection_role,
+                                "content": result.context_injection,
+                            }
                         )
                         logger.debug(
                             f"Last message role is '{last_msg.get('role')}', not 'tool' - "
@@ -139,7 +157,50 @@ class BasicOrchestrator:
                         )
                 else:
                     # Default behavior: append as new message
-                    message_dicts.append({"role": result.context_injection_role, "content": result.context_injection})
+                    message_dicts.append(
+                        {
+                            "role": result.context_injection_role,
+                            "content": result.context_injection,
+                        }
+                    )
+
+            # Apply pending ephemeral injections from tool:post hooks
+            if self._pending_ephemeral_injections:
+                message_dicts = list(message_dicts)  # Ensure we have a mutable list
+                for injection in self._pending_ephemeral_injections:
+                    if (
+                        injection.get("append_to_last_tool_result")
+                        and len(message_dicts) > 0
+                    ):
+                        last_msg = message_dicts[-1]
+                        if last_msg.get("role") == "tool":
+                            original_content = last_msg.get("content", "")
+                            message_dicts[-1] = {
+                                **last_msg,
+                                "content": f"{original_content}\n\n{injection['content']}",
+                            }
+                            logger.debug(
+                                "Applied pending ephemeral injection to last tool result"
+                            )
+                        else:
+                            message_dicts.append(
+                                {
+                                    "role": injection["role"],
+                                    "content": injection["content"],
+                                }
+                            )
+                            logger.debug(
+                                "Last message not a tool result, created new message for injection"
+                            )
+                    else:
+                        message_dicts.append(
+                            {"role": injection["role"], "content": injection["content"]}
+                        )
+                        logger.debug(
+                            "Applied pending ephemeral injection as new message"
+                        )
+                # Clear pending injections after applying
+                self._pending_ephemeral_injections = []
 
             # Convert to ChatRequest with Message objects
             try:
@@ -149,13 +210,21 @@ class BasicOrchestrator:
                 tools_list = None
                 if tools:
                     tools_list = [
-                        ToolSpec(name=t.name, description=t.description, parameters=t.input_schema)
+                        ToolSpec(
+                            name=t.name,
+                            description=t.description,
+                            parameters=t.input_schema,
+                        )
                         for t in tools.values()
                     ]
 
                 chat_request = ChatRequest(messages=messages_objects, tools=tools_list)
-                logger.debug(f"Created ChatRequest with {len(messages_objects)} messages")
-                logger.debug(f"Message roles: {[m.role for m in chat_request.messages]}")
+                logger.debug(
+                    f"Created ChatRequest with {len(messages_objects)} messages"
+                )
+                logger.debug(
+                    f"Message roles: {[m.role for m in chat_request.messages]}"
+                )
             except Exception as e:
                 logger.error(f"Failed to create ChatRequest: {e}")
                 logger.error(f"Message dicts: {message_dicts}")
@@ -176,7 +245,11 @@ class BasicOrchestrator:
 
                 await hooks.emit(
                     PROVIDER_RESPONSE,
-                    {"provider": provider_name, "usage": usage, "tool_calls": bool(tool_calls)},
+                    {
+                        "provider": provider_name,
+                        "usage": usage,
+                        "tool_calls": bool(tool_calls),
+                    },
                 )
 
                 # Emit content block events if present
@@ -188,7 +261,9 @@ class BasicOrchestrator:
                     total_blocks = len(content_blocks)
                     logger.info(f"Emitting events for {total_blocks} content blocks")
                     for idx, block in enumerate(content_blocks):
-                        logger.info(f"Emitting CONTENT_BLOCK_START for block {idx}, type: {block.type.value}")
+                        logger.info(
+                            f"Emitting CONTENT_BLOCK_START for block {idx}, type: {block.type.value}"
+                        )
                         # Emit block start (without non-serializable raw object)
                         await hooks.emit(
                             CONTENT_BLOCK_START,
@@ -206,7 +281,11 @@ class BasicOrchestrator:
                             "block": block.to_dict(),
                         }
                         if usage:
-                            event_data["usage"] = usage.model_dump() if hasattr(usage, "model_dump") else usage
+                            event_data["usage"] = (
+                                usage.model_dump()
+                                if hasattr(usage, "model_dump")
+                                else usage
+                            )
                         await hooks.emit(CONTENT_BLOCK_END, event_data)
 
                 # Handle tool calls (parallel execution)
@@ -219,14 +298,19 @@ class BasicOrchestrator:
                             assistant_msg = {
                                 "role": "assistant",
                                 "content": [
-                                    block.model_dump() if hasattr(block, "model_dump") else block
+                                    block.model_dump()
+                                    if hasattr(block, "model_dump")
+                                    else block
                                     for block in response_content
                                 ],
                                 "tool_calls": [
                                     {
                                         "id": getattr(tc, "id", None) or tc.get("id"),
-                                        "tool": getattr(tc, "name", None) or tc.get("tool"),
-                                        "arguments": getattr(tc, "arguments", None) or tc.get("arguments") or {},
+                                        "tool": getattr(tc, "name", None)
+                                        or tc.get("tool"),
+                                        "arguments": getattr(tc, "arguments", None)
+                                        or tc.get("arguments")
+                                        or {},
                                     }
                                     for tc in tool_calls
                                 ],
@@ -238,8 +322,11 @@ class BasicOrchestrator:
                                 "tool_calls": [
                                     {
                                         "id": getattr(tc, "id", None) or tc.get("id"),
-                                        "tool": getattr(tc, "name", None) or tc.get("tool"),
-                                        "arguments": getattr(tc, "arguments", None) or tc.get("arguments") or {},
+                                        "tool": getattr(tc, "name", None)
+                                        or tc.get("tool"),
+                                        "arguments": getattr(tc, "arguments", None)
+                                        or tc.get("arguments")
+                                        or {},
                                     }
                                     for tc in tool_calls
                                 ],
@@ -260,7 +347,9 @@ class BasicOrchestrator:
                     parallel_group_id = str(uuid.uuid4())
 
                     # Create tasks for parallel execution
-                    async def execute_single_tool(tc: Any, group_id: str) -> tuple[str, str]:
+                    async def execute_single_tool(
+                        tc: Any, group_id: str
+                    ) -> tuple[str, str]:
                         """Execute one tool, handling all errors gracefully.
 
                         Always returns (tool_call_id, result_or_error) tuple.
@@ -268,12 +357,16 @@ class BasicOrchestrator:
                         """
                         tool_name = getattr(tc, "name", None) or tc.get("tool")
                         tool_call_id = getattr(tc, "id", None) or tc.get("id")
-                        args = getattr(tc, "arguments", None) or tc.get("arguments") or {}
+                        args = (
+                            getattr(tc, "arguments", None) or tc.get("arguments") or {}
+                        )
                         tool = tools.get(tool_name)
 
                         # Register tool with cancellation token for visibility
                         if coordinator:
-                            coordinator.cancellation.register_tool_start(tool_call_id, tool_name)
+                            coordinator.cancellation.register_tool_start(
+                                tool_call_id, tool_name
+                            )
 
                         try:
                             try:
@@ -287,9 +380,14 @@ class BasicOrchestrator:
                                     },
                                 )
                                 if coordinator:
-                                    pre_result = await coordinator.process_hook_result(pre_result, "tool:pre", tool_name)
+                                    pre_result = await coordinator.process_hook_result(
+                                        pre_result, "tool:pre", tool_name
+                                    )
                                     if pre_result.action == "deny":
-                                        return (tool_call_id, f"Denied by hook: {pre_result.reason}")
+                                        return (
+                                            tool_call_id,
+                                            f"Denied by hook: {pre_result.reason}",
+                                        )
 
                                 if not tool:
                                     error_msg = f"Error: Tool '{tool_name}' not found"
@@ -297,7 +395,10 @@ class BasicOrchestrator:
                                         TOOL_ERROR,
                                         {
                                             "tool_name": tool_name,
-                                            "error": {"type": "RuntimeError", "msg": error_msg},
+                                            "error": {
+                                                "type": "RuntimeError",
+                                                "msg": error_msg,
+                                            },
                                             "parallel_group_id": group_id,
                                         },
                                     )
@@ -321,7 +422,26 @@ class BasicOrchestrator:
                                     },
                                 )
                                 if coordinator:
-                                    await coordinator.process_hook_result(post_result, "tool:post", tool_name)
+                                    await coordinator.process_hook_result(
+                                        post_result, "tool:post", tool_name
+                                    )
+
+                                # Store ephemeral injection from tool:post for next iteration
+                                if (
+                                    post_result.action == "inject_context"
+                                    and post_result.ephemeral
+                                    and post_result.context_injection
+                                ):
+                                    self._pending_ephemeral_injections.append(
+                                        {
+                                            "role": post_result.context_injection_role,
+                                            "content": post_result.context_injection,
+                                            "append_to_last_tool_result": post_result.append_to_last_tool_result,
+                                        }
+                                    )
+                                    logger.debug(
+                                        f"Stored ephemeral injection from tool:post ({tool_name}) for next iteration"
+                                    )
 
                                 # Return success with result content (JSON-serialized for dict/list)
                                 result_content = result.get_serialized_output()
@@ -333,7 +453,10 @@ class BasicOrchestrator:
                                     TOOL_ERROR,
                                     {
                                         "tool_name": tool_name,
-                                        "error": {"type": type(te).__name__, "msg": str(te)},
+                                        "error": {
+                                            "type": type(te).__name__,
+                                            "msg": str(te),
+                                        },
                                         "parallel_group_id": group_id,
                                     },
                                 )
@@ -345,19 +468,26 @@ class BasicOrchestrator:
                         finally:
                             # Unregister tool from cancellation token
                             if coordinator:
-                                coordinator.cancellation.register_tool_complete(tool_call_id)
+                                coordinator.cancellation.register_tool_complete(
+                                    tool_call_id
+                                )
 
                     # Execute all tools in parallel with asyncio.gather
                     # return_exceptions=False because we handle exceptions inside execute_single_tool
                     # Wrap in try/except for CancelledError to handle immediate cancellation
                     try:
                         tool_results = await asyncio.gather(
-                            *[execute_single_tool(tc, parallel_group_id) for tc in tool_calls]
+                            *[
+                                execute_single_tool(tc, parallel_group_id)
+                                for tc in tool_calls
+                            ]
                         )
                     except asyncio.CancelledError:
                         # Immediate cancellation (second Ctrl+C) - synthesize cancelled results
                         # for ALL tool_calls to maintain tool_use/tool_result pairing
-                        logger.info("Tool execution cancelled - synthesizing cancelled results")
+                        logger.info(
+                            "Tool execution cancelled - synthesizing cancelled results"
+                        )
                         for tc in tool_calls:
                             if hasattr(context, "add_message"):
                                 await context.add_message(
@@ -429,7 +559,9 @@ class BasicOrchestrator:
                             assistant_msg = {
                                 "role": "assistant",
                                 "content": [
-                                    block.model_dump() if hasattr(block, "model_dump") else block
+                                    block.model_dump()
+                                    if hasattr(block, "model_dump")
+                                    else block
                                     for block in response_content
                                 ],
                             }
@@ -448,16 +580,32 @@ class BasicOrchestrator:
             except Exception as e:
                 await hooks.emit(
                     PROVIDER_ERROR,
-                    {"provider": provider_name, "error": {"type": type(e).__name__, "msg": str(e)}},
+                    {
+                        "provider": provider_name,
+                        "error": {"type": type(e).__name__, "msg": str(e)},
+                    },
                 )
                 raise
 
         # Check if we exceeded max iterations (only if not unlimited)
-        if self.max_iterations != -1 and iteration >= self.max_iterations and not final_content:
-            logger.warning(f"Max iterations ({self.max_iterations}) reached without final response")
+        if (
+            self.max_iterations != -1
+            and iteration >= self.max_iterations
+            and not final_content
+        ):
+            logger.warning(
+                f"Max iterations ({self.max_iterations}) reached without final response"
+            )
 
             # Inject system reminder to agent before final response
-            await hooks.emit(PROVIDER_REQUEST, {"provider": provider_name, "iteration": iteration, "max_reached": True})
+            await hooks.emit(
+                PROVIDER_REQUEST,
+                {
+                    "provider": provider_name,
+                    "iteration": iteration,
+                    "max_reached": True,
+                },
+            )
             if coordinator:
                 # Inject ephemeral reminder (not stored in context)
                 await coordinator.process_hook_result(
@@ -476,9 +624,13 @@ You have reached the maximum number of iterations for this turn. Please provide 
 
             # Get one final response with the reminder (context handles compaction internally)
             if hasattr(context, "get_messages_for_request"):
-                message_dicts = await context.get_messages_for_request(provider=provider)
+                message_dicts = await context.get_messages_for_request(
+                    provider=provider
+                )
             else:
-                message_dicts = getattr(context, "messages", [{"role": "user", "content": prompt}])
+                message_dicts = getattr(
+                    context, "messages", [{"role": "user", "content": prompt}]
+                )
             message_dicts = list(message_dicts)
             message_dicts.append(
                 {
@@ -498,7 +650,11 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                 tools_list = None
                 if tools:
                     tools_list = [
-                        ToolSpec(name=t.name, description=t.description, parameters=t.input_schema)
+                        ToolSpec(
+                            name=t.name,
+                            description=t.description,
+                            parameters=t.input_schema,
+                        )
                         for t in tools.values()
                     ]
 
@@ -521,7 +677,9 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                             assistant_msg = {
                                 "role": "assistant",
                                 "content": [
-                                    block.model_dump() if hasattr(block, "model_dump") else block
+                                    block.model_dump()
+                                    if hasattr(block, "model_dump")
+                                    else block
                                     for block in response_content
                                 ],
                             }
@@ -537,7 +695,10 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
 
         await hooks.emit(
             PROMPT_COMPLETE,
-            {"response_preview": (final_content or "")[:200], "length": len(final_content or "")},
+            {
+                "response_preview": (final_content or "")[:200],
+                "length": len(final_content or ""),
+            },
         )
 
         # Emit orchestrator complete event
