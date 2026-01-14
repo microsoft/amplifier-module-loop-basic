@@ -42,10 +42,13 @@ Provides a standard, deterministic orchestration loop for AI agents. This is the
 module = "loop-basic"
 name = "basic"
 config = {
-    max_iterations = -1,  # Maximum iterations (-1 = unlimited, default)
-    timeout = 300         # Timeout in seconds
+    max_iterations = 200,  # Maximum iterations (default: 200, -1 = unlimited)
+    timeout = 300          # Timeout in seconds
 }
 ```
+
+> **Note**: The default `max_iterations` is 200 as a safety net against runaway loops. 
+> This applies to both root and sub-sessions. Set to `-1` explicitly for unlimited iterations.
 
 ## Usage
 
