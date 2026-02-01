@@ -236,6 +236,21 @@ class BasicOrchestrator:
                     if self.extended_thinking:
                         kwargs["extended_thinking"] = True
                     response = await provider.complete(chat_request, **kwargs)
+
+                    # Check for immediate cancellation after provider returns
+                    # This allows force-cancel to take effect as soon as the blocking
+                    # provider call completes, before processing the response
+                    if coordinator and coordinator.cancellation.is_immediate:
+                        # Emit cancelled status and exit
+                        await hooks.emit(
+                            ORCHESTRATOR_COMPLETE,
+                            {
+                                "orchestrator": "loop-basic",
+                                "turn_count": iteration,
+                                "status": "cancelled",
+                            },
+                        )
+                        return final_content
                 else:
                     raise RuntimeError(f"Provider {provider_name} missing 'complete'")
 
