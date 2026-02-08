@@ -22,6 +22,7 @@ from amplifier_core.events import PROVIDER_RESPONSE
 from amplifier_core.events import TOOL_ERROR
 from amplifier_core.events import TOOL_POST
 from amplifier_core.events import TOOL_PRE
+from amplifier_core.llm_errors import LLMError
 from amplifier_core.message_models import ChatRequest
 from amplifier_core.message_models import Message
 from amplifier_core.message_models import ToolSpec
@@ -218,7 +219,11 @@ class BasicOrchestrator:
                         for t in tools.values()
                     ]
 
-                chat_request = ChatRequest(messages=messages_objects, tools=tools_list)
+                chat_request = ChatRequest(
+                    messages=messages_objects,
+                    tools=tools_list,
+                    reasoning_effort=self.config.get("reasoning_effort"),
+                )
                 logger.debug(
                     f"Created ChatRequest with {len(messages_objects)} messages"
                 )
@@ -592,6 +597,17 @@ class BasicOrchestrator:
                 logger.warning("Provider returned neither content nor tool calls")
                 iteration += 1
 
+            except LLMError as e:
+                await hooks.emit(
+                    PROVIDER_ERROR,
+                    {
+                        "provider": provider_name,
+                        "error": {"type": type(e).__name__, "msg": str(e)},
+                        "retryable": e.retryable,
+                        "status_code": e.status_code,
+                    },
+                )
+                raise
             except Exception as e:
                 await hooks.emit(
                     PROVIDER_ERROR,
@@ -673,7 +689,11 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                         for t in tools.values()
                     ]
 
-                chat_request = ChatRequest(messages=messages_objects, tools=tools_list)
+                chat_request = ChatRequest(
+                    messages=messages_objects,
+                    tools=tools_list,
+                    reasoning_effort=self.config.get("reasoning_effort"),
+                )
 
                 kwargs = {}
                 if self.extended_thinking:
@@ -705,7 +725,25 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                             assistant_msg["metadata"] = response.metadata
                         await context.add_message(assistant_msg)
 
+            except LLMError as e:
+                await hooks.emit(
+                    PROVIDER_ERROR,
+                    {
+                        "provider": provider_name,
+                        "error": {"type": type(e).__name__, "msg": str(e)},
+                        "retryable": e.retryable,
+                        "status_code": e.status_code,
+                    },
+                )
+                logger.error(f"Error getting final response after max iterations: {e}")
             except Exception as e:
+                await hooks.emit(
+                    PROVIDER_ERROR,
+                    {
+                        "provider": provider_name,
+                        "error": {"type": type(e).__name__, "msg": str(e)},
+                    },
+                )
                 logger.error(f"Error getting final response after max iterations: {e}")
 
         await hooks.emit(
