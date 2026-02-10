@@ -5,6 +5,7 @@ Basic orchestrator with complete event emissions (desired state).
 # Amplifier module metadata
 __amplifier_module_type__ = "orchestrator"
 
+import json
 import logging
 from typing import Any
 
@@ -463,8 +464,27 @@ class BasicOrchestrator:
                                         f"Stored ephemeral injection from tool:post ({tool_name}) for next iteration"
                                     )
 
-                                # Return success with result content (JSON-serialized for dict/list)
-                                result_content = result.get_serialized_output()
+                                # Check if a hook modified the tool result.
+                                # hooks.emit() chains modify actions: when a hook
+                                # returns action="modify", the data dict is replaced.
+                                # We detect this by checking if the returned "result"
+                                # is a different object than what we originally sent.
+                                modified_result = None
+                                if post_result and post_result.data is not None:
+                                    returned_result = post_result.data.get("result")
+                                    if (
+                                        returned_result is not None
+                                        and returned_result is not result_data
+                                    ):
+                                        modified_result = returned_result
+
+                                if modified_result is not None:
+                                    if isinstance(modified_result, (dict, list)):
+                                        result_content = json.dumps(modified_result)
+                                    else:
+                                        result_content = str(modified_result)
+                                else:
+                                    result_content = result.get_serialized_output()
                                 return (tool_call_id, result_content)
 
                             except Exception as te:
