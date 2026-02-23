@@ -487,7 +487,7 @@ class BasicOrchestrator:
                                     result_content = result.get_serialized_output()
                                 return (tool_call_id, result_content)
 
-                            except Exception as te:
+                            except (Exception, asyncio.CancelledError) as te:
                                 # Emit error event
                                 await hooks.emit(
                                     TOOL_ERROR,
@@ -524,19 +524,28 @@ class BasicOrchestrator:
                         )
                     except asyncio.CancelledError:
                         # Immediate cancellation (second Ctrl+C) - synthesize cancelled results
-                        # for ALL tool_calls to maintain tool_use/tool_result pairing
+                        # for ALL tool_calls to maintain tool_use/tool_result pairing.
+                        # Protect from further CancelledError using kernel
+                        # catch-continue-reraise pattern so all results are written.
                         logger.info(
                             "Tool execution cancelled - synthesizing cancelled results"
                         )
                         for tc in tool_calls:
-                            if hasattr(context, "add_message"):
-                                await context.add_message(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": getattr(tc, "id", None)
-                                        or tc.get("id"),
-                                        "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{getattr(tc, "name", None) or tc.get("tool")}"}}',
-                                    }
+                            try:
+                                if hasattr(context, "add_message"):
+                                    await context.add_message(
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": getattr(tc, "id", None)
+                                            or tc.get("id"),
+                                            "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{getattr(tc, "name", None) or tc.get("tool")}"}}',
+                                        }
+                                    )
+                            except asyncio.CancelledError:
+                                logger.info(
+                                    "CancelledError during synthetic result write - "
+                                    "completing remaining writes to prevent "
+                                    "orphaned tool_calls"
                                 )
                         # Re-raise to let the cancellation propagate
                         raise
@@ -546,15 +555,30 @@ class BasicOrchestrator:
                         # MUST add tool results to context before returning
                         # Otherwise we leave orphaned tool_calls without matching tool_results
                         # which violates provider API contracts (Anthropic, OpenAI)
+                        # Protect from CancelledError using kernel catch-continue-reraise
+                        # pattern (coordinator.cleanup, hooks.emit) so all results are
+                        # written even if force-cancel arrives mid-loop.
+                        _cancel_error = None
                         for tool_call_id, content in tool_results:
-                            if hasattr(context, "add_message"):
-                                await context.add_message(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call_id,
-                                        "content": content,
-                                    }
-                                )
+                            try:
+                                if hasattr(context, "add_message"):
+                                    await context.add_message(
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": tool_call_id,
+                                            "content": content,
+                                        }
+                                    )
+                            except asyncio.CancelledError:
+                                if _cancel_error is None:
+                                    _cancel_error = asyncio.CancelledError()
+                                    logger.info(
+                                        "CancelledError during tool result write - "
+                                        "completing remaining writes to prevent "
+                                        "orphaned tool_calls"
+                                    )
+                        if _cancel_error is not None:
+                            raise _cancel_error
                         await hooks.emit(
                             ORCHESTRATOR_COMPLETE,
                             {
@@ -566,15 +590,30 @@ class BasicOrchestrator:
                         return final_content
 
                     # Add all tool results to context in original order (deterministic)
+                    # Protect from CancelledError using kernel catch-continue-reraise
+                    # pattern so all results are written even if force-cancel arrives
+                    # mid-loop.
+                    _cancel_error = None
                     for tool_call_id, content in tool_results:
-                        if hasattr(context, "add_message"):
-                            await context.add_message(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call_id,
-                                    "content": content,
-                                }
-                            )
+                        try:
+                            if hasattr(context, "add_message"):
+                                await context.add_message(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call_id,
+                                        "content": content,
+                                    }
+                                )
+                        except asyncio.CancelledError:
+                            if _cancel_error is None:
+                                _cancel_error = asyncio.CancelledError()
+                                logger.info(
+                                    "CancelledError during tool result write - "
+                                    "completing remaining writes to prevent "
+                                    "orphaned tool_calls"
+                                )
+                    if _cancel_error is not None:
+                        raise _cancel_error
 
                     # After executing tools, continue loop to get final response
                     iteration += 1
