@@ -533,8 +533,9 @@ class BasicOrchestrator:
                                 await context.add_message(
                                     {
                                         "role": "tool",
-                                        "tool_call_id": tc.id,
-                                        "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{tc.name}"}}',
+                                        "tool_call_id": getattr(tc, "id", None)
+                                        or tc.get("id"),
+                                        "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{getattr(tc, "name", None) or tc.get("tool")}"}}',
                                     }
                                 )
                         # Re-raise to let the cancellation propagate
