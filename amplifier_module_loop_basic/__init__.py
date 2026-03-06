@@ -419,6 +419,17 @@ class BasicOrchestrator:
                                 coordinator.cancellation.register_tool_start(
                                     tool_call_id, tool_name
                                 )
+                                # Set dispatch context so tools (e.g. delegate) can
+                                # read the framework-assigned tool_call_id and
+                                # parallel_group_id.  Cleared in the finally block.
+                                setattr(
+                                    coordinator,
+                                    "_tool_dispatch_context",
+                                    {
+                                        "tool_call_id": tool_call_id,
+                                        "parallel_group_id": group_id,
+                                    },
+                                )
 
                             try:
                                 try:
@@ -545,8 +556,9 @@ class BasicOrchestrator:
                                     logger.error(f"Tool {tool_name} failed: {te}")
                                     return (tool_call_id, error_msg)
                             finally:
-                                # Unregister tool from cancellation token
+                                # Clear dispatch context and unregister tool
                                 if coordinator:
+                                    setattr(coordinator, "_tool_dispatch_context", {})
                                     coordinator.cancellation.register_tool_complete(
                                         tool_call_id
                                     )
