@@ -354,13 +354,9 @@ class BasicOrchestrator:
                                     ],
                                     "tool_calls": [
                                         {
-                                            "id": getattr(tc, "id", None)
-                                            or tc.get("id"),
-                                            "tool": getattr(tc, "name", None)
-                                            or tc.get("tool"),
-                                            "arguments": getattr(tc, "arguments", None)
-                                            or tc.get("arguments")
-                                            or {},
+                                            "id": tc.id if hasattr(tc, "id") else tc.get("id"),
+                                            "tool": tc.name if hasattr(tc, "name") else tc.get("tool"),
+                                            "arguments": tc.arguments if hasattr(tc, "arguments") else (tc.get("arguments") or {}),
                                         }
                                         for tc in tool_calls
                                     ],
@@ -371,13 +367,9 @@ class BasicOrchestrator:
                                     "content": content if content else "",
                                     "tool_calls": [
                                         {
-                                            "id": getattr(tc, "id", None)
-                                            or tc.get("id"),
-                                            "tool": getattr(tc, "name", None)
-                                            or tc.get("tool"),
-                                            "arguments": getattr(tc, "arguments", None)
-                                            or tc.get("arguments")
-                                            or {},
+                                            "id": tc.id if hasattr(tc, "id") else tc.get("id"),
+                                            "tool": tc.name if hasattr(tc, "name") else tc.get("tool"),
+                                            "arguments": tc.arguments if hasattr(tc, "arguments") else (tc.get("arguments") or {}),
                                         }
                                         for tc in tool_calls
                                     ],
@@ -405,12 +397,10 @@ class BasicOrchestrator:
                             Always returns (tool_call_id, result_or_error) tuple.
                             Never raises - errors become error results.
                             """
-                            tool_name = getattr(tc, "name", None) or tc.get("tool")
-                            tool_call_id = getattr(tc, "id", None) or tc.get("id")
+                            tool_name = tc.name if hasattr(tc, "name") else tc.get("tool")
+                            tool_call_id = tc.id if hasattr(tc, "id") else tc.get("id")
                             args = (
-                                getattr(tc, "arguments", None)
-                                or tc.get("arguments")
-                                or {}
+                                tc.arguments if hasattr(tc, "arguments") else (tc.get("arguments") or {})
                             )
                             tool = tools.get(tool_name)
 
@@ -587,9 +577,8 @@ class BasicOrchestrator:
                                         await context.add_message(
                                             {
                                                 "role": "tool",
-                                                "tool_call_id": getattr(tc, "id", None)
-                                                or tc.get("id"),
-                                                "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{getattr(tc, "name", None) or tc.get("tool")}"}}',
+                                                "tool_call_id": tc.id if hasattr(tc, "id") else tc.get("id"),
+                                                "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{tc.name if hasattr(tc, "name") else tc.get("tool")}"}}',
                                             }
                                         )
                                 except asyncio.CancelledError:
