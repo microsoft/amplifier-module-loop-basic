@@ -103,7 +103,7 @@ class BasicOrchestrator:
                         CANCEL_REQUESTED,
                         {
                             "orchestrator": "loop-basic",
-                            "state": coordinator.cancellation.state.value,
+                            "state": str(coordinator.cancellation.state),
                             "turn_count": iteration,
                         },
                     )
@@ -285,7 +285,7 @@ class BasicOrchestrator:
                                 CANCEL_REQUESTED,
                                 {
                                     "orchestrator": "loop-basic",
-                                    "state": coordinator.cancellation.state.value,
+                                    "state": str(coordinator.cancellation.state),
                                     "turn_count": iteration,
                                 },
                             )
@@ -599,7 +599,7 @@ class BasicOrchestrator:
                                 CANCEL_REQUESTED,
                                 {
                                     "orchestrator": "loop-basic",
-                                    "state": coordinator.cancellation.state.value,
+                                    "state": str(coordinator.cancellation.state),
                                     "turn_count": iteration,
                                 },
                             )
@@ -640,7 +640,7 @@ class BasicOrchestrator:
                                 CANCEL_REQUESTED,
                                 {
                                     "orchestrator": "loop-basic",
-                                    "state": coordinator.cancellation.state.value,
+                                    "state": str(coordinator.cancellation.state),
                                     "turn_count": iteration,
                                 },
                             )
