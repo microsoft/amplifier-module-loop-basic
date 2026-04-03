@@ -12,6 +12,8 @@ from typing import Any
 from amplifier_core import HookRegistry
 from amplifier_core import HookResult
 from amplifier_core import ModuleCoordinator
+from amplifier_core.events import CANCEL_COMPLETED
+from amplifier_core.events import CANCEL_REQUESTED
 from amplifier_core.events import CONTENT_BLOCK_END
 from amplifier_core.events import CONTENT_BLOCK_START
 from amplifier_core.events import ORCHESTRATOR_COMPLETE
@@ -49,6 +51,8 @@ class BasicOrchestrator:
         self.extended_thinking = config.get("extended_thinking", False)
         # Store ephemeral injections from tool:post hooks for next iteration
         self._pending_ephemeral_injections: list[dict[str, Any]] = []
+        # Track whether cancel:requested has been emitted for the current execution
+        self._cancel_requested_emitted: bool = False
 
     async def execute(
         self,
@@ -59,6 +63,9 @@ class BasicOrchestrator:
         hooks: HookRegistry,
         coordinator: ModuleCoordinator | None = None,
     ) -> str:
+        # Reset cancellation event tracking for this execution
+        self._cancel_requested_emitted = False
+
         # Emit and process prompt submit (allows hooks to inject context on session start)
         result = await hooks.emit(PROMPT_SUBMIT, {"prompt": prompt})
         if coordinator:
@@ -89,6 +96,30 @@ class BasicOrchestrator:
         while self.max_iterations == -1 or iteration < self.max_iterations:
             # Check for cancellation at iteration start
             if coordinator and coordinator.cancellation.is_cancelled:
+                # Emit cancel:requested on first detection and trigger cleanup callbacks
+                if not self._cancel_requested_emitted:
+                    self._cancel_requested_emitted = True
+                    await hooks.emit(
+                        CANCEL_REQUESTED,
+                        {
+                            "orchestrator": "loop-basic",
+                            "state": coordinator.cancellation.state.value,
+                            "turn_count": iteration,
+                        },
+                    )
+                    try:
+                        await coordinator.cancellation.trigger_callbacks()
+                    except Exception as e:
+                        logger.warning(f"Error in cancellation callbacks: {e}")
+                # Emit cancel:completed — orchestrator is exiting due to cancellation
+                await hooks.emit(
+                    CANCEL_COMPLETED,
+                    {
+                        "orchestrator": "loop-basic",
+                        "was_immediate": coordinator.cancellation.is_immediate,
+                        "turn_count": iteration,
+                    },
+                )
                 # Emit orchestrator complete with cancelled status
                 await hooks.emit(
                     ORCHESTRATOR_COMPLETE,
@@ -247,6 +278,30 @@ class BasicOrchestrator:
                     # This allows force-cancel to take effect as soon as the blocking
                     # provider call completes, before processing the response
                     if coordinator and coordinator.cancellation.is_immediate:
+                        # Emit cancel:requested on first detection and trigger cleanup callbacks
+                        if not self._cancel_requested_emitted:
+                            self._cancel_requested_emitted = True
+                            await hooks.emit(
+                                CANCEL_REQUESTED,
+                                {
+                                    "orchestrator": "loop-basic",
+                                    "state": coordinator.cancellation.state.value,
+                                    "turn_count": iteration,
+                                },
+                            )
+                            try:
+                                await coordinator.cancellation.trigger_callbacks()
+                            except Exception as e:
+                                logger.warning(f"Error in cancellation callbacks: {e}")
+                        # Emit cancel:completed — orchestrator is exiting due to cancellation
+                        await hooks.emit(
+                            CANCEL_COMPLETED,
+                            {
+                                "orchestrator": "loop-basic",
+                                "was_immediate": coordinator.cancellation.is_immediate,
+                                "turn_count": iteration,
+                            },
+                        )
                         # Emit cancelled status and exit
                         await hooks.emit(
                             ORCHESTRATOR_COMPLETE,
@@ -537,6 +592,30 @@ class BasicOrchestrator:
                                         "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{tc.name}"}}',
                                     }
                                 )
+                        # Emit cancel events before re-raising so hooks receive them
+                        if coordinator and not self._cancel_requested_emitted:
+                            self._cancel_requested_emitted = True
+                            await hooks.emit(
+                                CANCEL_REQUESTED,
+                                {
+                                    "orchestrator": "loop-basic",
+                                    "state": coordinator.cancellation.state.value,
+                                    "turn_count": iteration,
+                                },
+                            )
+                            try:
+                                await coordinator.cancellation.trigger_callbacks()
+                            except Exception as e:
+                                logger.warning(f"Error in cancellation callbacks: {e}")
+                        if coordinator:
+                            await hooks.emit(
+                                CANCEL_COMPLETED,
+                                {
+                                    "orchestrator": "loop-basic",
+                                    "was_immediate": coordinator.cancellation.is_immediate,
+                                    "turn_count": iteration,
+                                },
+                            )
                         # Re-raise to let the cancellation propagate
                         raise
 
@@ -554,6 +633,30 @@ class BasicOrchestrator:
                                         "content": content,
                                     }
                                 )
+                        # Emit cancel:requested on first detection and trigger cleanup callbacks
+                        if not self._cancel_requested_emitted:
+                            self._cancel_requested_emitted = True
+                            await hooks.emit(
+                                CANCEL_REQUESTED,
+                                {
+                                    "orchestrator": "loop-basic",
+                                    "state": coordinator.cancellation.state.value,
+                                    "turn_count": iteration,
+                                },
+                            )
+                            try:
+                                await coordinator.cancellation.trigger_callbacks()
+                            except Exception as e:
+                                logger.warning(f"Error in cancellation callbacks: {e}")
+                        # Emit cancel:completed — orchestrator is exiting due to cancellation
+                        await hooks.emit(
+                            CANCEL_COMPLETED,
+                            {
+                                "orchestrator": "loop-basic",
+                                "was_immediate": coordinator.cancellation.is_immediate,
+                                "turn_count": iteration,
+                            },
+                        )
                         await hooks.emit(
                             ORCHESTRATOR_COMPLETE,
                             {
