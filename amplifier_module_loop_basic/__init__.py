@@ -444,11 +444,19 @@ class BasicOrchestrator:
                             display_name = tool_name
                             if tool_name == "delegate":
                                 try:
-                                    _args = args if isinstance(args, dict) else json.loads(args)
+                                    _args = (
+                                        args
+                                        if isinstance(args, dict)
+                                        else json.loads(args)
+                                    )
                                     _agent = _args.get("agent", "")
                                     if _agent:
                                         display_name = _agent
-                                except (json.JSONDecodeError, TypeError, AttributeError):
+                                except (
+                                    json.JSONDecodeError,
+                                    TypeError,
+                                    AttributeError,
+                                ):
                                     pass
                             coordinator.cancellation.register_tool_start(
                                 tool_call_id, display_name
@@ -630,10 +638,12 @@ class BasicOrchestrator:
                         # Without this, transcript has tool_results without a closing assistant
                         # message, triggering FM3 (incomplete_assistant_turn) on resume.
                         if hasattr(context, "add_message"):
-                            await context.add_message({
-                                "role": "assistant",
-                                "content": "The previous operation was cancelled. Results from completed tools have been preserved.",
-                            })
+                            await context.add_message(
+                                {
+                                    "role": "assistant",
+                                    "content": "The previous operation was cancelled. Results from completed tools have been preserved.",
+                                }
+                            )
                         # Re-raise to let the cancellation propagate
                         raise
 
@@ -687,10 +697,12 @@ class BasicOrchestrator:
                         # Without this, transcript has tool_results without a closing assistant
                         # message, triggering FM3 (incomplete_assistant_turn) on resume.
                         if hasattr(context, "add_message"):
-                            await context.add_message({
-                                "role": "assistant",
-                                "content": "The previous operation was cancelled. Results from completed tools have been preserved.",
-                            })
+                            await context.add_message(
+                                {
+                                    "role": "assistant",
+                                    "content": "The previous operation was cancelled. Results from completed tools have been preserved.",
+                                }
+                            )
                         return final_content
 
                     # Add all tool results to context in original order (deterministic)
@@ -714,9 +726,19 @@ class BasicOrchestrator:
                     if isinstance(content, list):
                         text_parts = []
                         for block in content:
-                            if hasattr(block, "text"):
+                            block_type = getattr(block, "type", None)
+                            type_value = (
+                                getattr(block_type, "value", block_type)
+                                if block_type
+                                else None
+                            )
+                            if type_value == "text" and hasattr(block, "text"):
                                 text_parts.append(block.text)
-                            elif isinstance(block, dict) and "text" in block:
+                            elif (
+                                isinstance(block, dict)
+                                and block.get("type", "text") == "text"
+                                and "text" in block
+                            ):
                                 text_parts.append(block["text"])
                         final_content = "\n\n".join(text_parts) if text_parts else ""
                     else:
