@@ -31,6 +31,7 @@ Provides a standard, deterministic orchestration loop for AI agents. This is the
 
 - **Parallel tool execution**: Multiple tool calls execute concurrently (assumes LLM intent)
 - Deterministic context updates: Results added in original order
+- Empty argument dictionaries are valid for typed tool calls and dictionary-form calls.
 - Robust error handling: Failures return error results, never crash
 - Event correlation: `parallel_group_id` tracks related executions
 - No streaming (see loop-streaming for that)

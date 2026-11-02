@@ -33,6 +33,12 @@ from amplifier_core.message_models import ToolSpec
 logger = logging.getLogger(__name__)
 
 
+def _tool_call_arguments(tc: Any) -> dict[str, Any]:
+    if isinstance(tc, dict):
+        return tc.get("arguments") or {}
+    return getattr(tc, "arguments", None) or {}
+
+
 async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = None):
     config = config or {}
     orchestrator = BasicOrchestrator(config)
@@ -384,9 +390,7 @@ class BasicOrchestrator:
                                         "id": getattr(tc, "id", None) or tc.get("id"),
                                         "tool": getattr(tc, "name", None)
                                         or tc.get("tool"),
-                                        "arguments": getattr(tc, "arguments", None)
-                                        or tc.get("arguments")
-                                        or {},
+                                        "arguments": _tool_call_arguments(tc),
                                     }
                                     for tc in tool_calls
                                 ],
@@ -400,9 +404,7 @@ class BasicOrchestrator:
                                         "id": getattr(tc, "id", None) or tc.get("id"),
                                         "tool": getattr(tc, "name", None)
                                         or tc.get("tool"),
-                                        "arguments": getattr(tc, "arguments", None)
-                                        or tc.get("arguments")
-                                        or {},
+                                        "arguments": _tool_call_arguments(tc),
                                     }
                                     for tc in tool_calls
                                 ],
@@ -433,9 +435,7 @@ class BasicOrchestrator:
                         """
                         tool_name = getattr(tc, "name", None) or tc.get("tool")
                         tool_call_id = getattr(tc, "id", None) or tc.get("id")
-                        args = (
-                            getattr(tc, "arguments", None) or tc.get("arguments") or {}
-                        )
+                        args = _tool_call_arguments(tc)
                         tool = tools.get(tool_name)
 
                         # Register tool with cancellation token for visibility
