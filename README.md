@@ -35,6 +35,41 @@ Provides a standard, deterministic orchestration loop for AI agents. This is the
 - Event correlation: `parallel_group_id` tracks related executions
 - No streaming (see loop-streaming for that)
 
+### Experimental media references
+
+With a compatible host-bound `experimental.media.v1` capability, canonical rich
+tool images are staged before `tool:post` observers. Only the final effective
+hook output's structured `output["experimental.media.v1"] = {"refs": [...]}` is
+published. Explicit null, removal, denial, errors and JSON-looking strings cannot
+restore refs from the original result. Ordered tool messages carry admitted refs
+in the same metadata namespace, including completed siblings during cancellation.
+
+The capability is structural (version 1; `ingest`, `publish`, `validate`,
+`resolve`, `prepare_request`, `report`); this module imports only Core, not
+Foundation or an application. Producers can read their actual concurrent call
+identity from the host's task-keyed `_tool_dispatch_contexts` during execution.
+Mount reports consumer readiness as an observation, not execution permission.
+
+The host's existing no-argument `session.durable_checkpoint` runs after the
+settled ordered append. Ref-bearing results require that callback; `False` or an
+exception stops subsequent requests without rerunning tools. The host owns the
+exact saved-prefix acknowledgment and must refuse media preparation without an
+actual canonical commit. Cancellation saves paired results and the closing
+assistant message, and never starts a new provider request. An interrupted
+checkpoint has an unknown durable outcome: cleanup runs, in-memory evidence is
+preserved, and the host reconciles the save without the loop replaying it.
+
+Both ordinary and max-iteration final `ChatRequest` objects remain reference-only.
+Install the qualified host/provider adapter on the actual selected provider,
+including context compaction/counting: the loop never resolves images or hydrates
+saved requests. Without compatible handling, canonical rich images become useful
+text plus an explicit unavailable warning, not fallback base64. Restored refs on
+an unsupported loop request receive the same warning without altering history.
+
+This is an experimental integration boundary, not a claim of visual inference,
+exact image-budget accounting, store durability or host/provider parity. Those
+require qualification against the accepted Foundation and host/provider graph.
+
 ## Configuration
 
 ```toml

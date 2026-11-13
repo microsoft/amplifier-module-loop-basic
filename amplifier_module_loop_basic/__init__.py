@@ -7,36 +7,58 @@ __amplifier_module_type__ = "orchestrator"
 
 import json
 import logging
+from copy import deepcopy
 from typing import Any
 
-from amplifier_core import HookRegistry
-from amplifier_core import HookResult
-from amplifier_core import ModuleCoordinator
-from amplifier_core.events import CANCEL_COMPLETED
-from amplifier_core.events import CANCEL_REQUESTED
-from amplifier_core.events import CONTENT_BLOCK_END
-from amplifier_core.events import CONTENT_BLOCK_START
-from amplifier_core.events import ORCHESTRATOR_COMPLETE
-from amplifier_core.events import PROMPT_COMPLETE
-from amplifier_core.events import PROMPT_SUBMIT
-from amplifier_core.events import PROVIDER_ERROR
-from amplifier_core.events import PROVIDER_REQUEST
-from amplifier_core.events import PROVIDER_RESPONSE
-from amplifier_core.events import TOOL_ERROR
-from amplifier_core.events import TOOL_POST
-from amplifier_core.events import TOOL_PRE
+from amplifier_core import HookRegistry, HookResult, ModuleCoordinator
+from amplifier_core.events import (
+    CANCEL_COMPLETED,
+    CANCEL_REQUESTED,
+    CONTENT_BLOCK_END,
+    CONTENT_BLOCK_START,
+    ORCHESTRATOR_COMPLETE,
+    PROMPT_COMPLETE,
+    PROMPT_SUBMIT,
+    PROVIDER_ERROR,
+    PROVIDER_REQUEST,
+    PROVIDER_RESPONSE,
+    TOOL_ERROR,
+    TOOL_POST,
+    TOOL_PRE,
+)
 from amplifier_core.llm_errors import LLMError
-from amplifier_core.message_models import ChatRequest
-from amplifier_core.message_models import Message
-from amplifier_core.message_models import ToolSpec
+from amplifier_core.message_models import ChatRequest, Message, ToolSpec
+
+from ._media import (
+    capability,
+    checkpoint,
+    dispatch_context,
+    media_call,
+    presentation,
+    request_messages,
+    settle,
+    stage,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_arguments(call):
+    # Empty arguments are valid on a Core ToolCall (which has no dict.get).
+    return (call.get("arguments") if isinstance(call, dict)
+            else getattr(call, "arguments", None)) or {}
 
 
 async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = None):
     config = config or {}
     orchestrator = BasicOrchestrator(config)
     await coordinator.mount("orchestrator", orchestrator)
+    media = capability(coordinator)
+    if media is not None:
+        await media_call(
+            media.report, None, event="consumer-ready", outcome="ready",
+            details={"contract": 1, "role": "loop"},
+        )
     logger.info("Mounted BasicOrchestrator (desired-state)")
     return
 
@@ -65,6 +87,7 @@ class BasicOrchestrator:
     ) -> str:
         # Reset cancellation event tracking for this execution
         self._cancel_requested_emitted = False
+        media = capability(coordinator)
 
         # Emit and process prompt submit (allows hooks to inject context on session start)
         result = await hooks.emit(PROMPT_SUBMIT, {"prompt": prompt})
@@ -143,6 +166,11 @@ class BasicOrchestrator:
                     return f"Operation denied: {result.reason}"
 
             # Get messages for LLM request (context handles compaction internally)
+            if self._cancelled(coordinator):
+                await self._finish_cancelled(
+                    context, hooks, coordinator, iteration, [],
+                )
+                return final_content
             # Pass provider for dynamic budget calculation based on model's context window
             if hasattr(context, "get_messages_for_request"):
                 message_dicts = await context.get_messages_for_request(
@@ -237,7 +265,9 @@ class BasicOrchestrator:
 
             # Convert to ChatRequest with Message objects
             try:
-                messages_objects = [Message(**msg) for msg in message_dicts]
+                messages_objects = [
+                    Message(**msg) for msg in request_messages(message_dicts, media)
+                ]
 
                 # Convert tools to ToolSpec format for ChatRequest
                 tools_list = None
@@ -268,6 +298,11 @@ class BasicOrchestrator:
                 raise
             try:
                 if hasattr(provider, "complete"):
+                    if self._cancelled(coordinator):
+                        await self._finish_cancelled(
+                            context, hooks, coordinator, iteration, [],
+                        )
+                        return final_content
                     # Pass extended_thinking if enabled in orchestrator config
                     kwargs = {}
                     if self.extended_thinking:
@@ -384,9 +419,7 @@ class BasicOrchestrator:
                                         "id": getattr(tc, "id", None) or tc.get("id"),
                                         "tool": getattr(tc, "name", None)
                                         or tc.get("tool"),
-                                        "arguments": getattr(tc, "arguments", None)
-                                        or tc.get("arguments")
-                                        or {},
+                                        "arguments": _tool_arguments(tc),
                                     }
                                     for tc in tool_calls
                                 ],
@@ -400,9 +433,7 @@ class BasicOrchestrator:
                                         "id": getattr(tc, "id", None) or tc.get("id"),
                                         "tool": getattr(tc, "name", None)
                                         or tc.get("tool"),
-                                        "arguments": getattr(tc, "arguments", None)
-                                        or tc.get("arguments")
-                                        or {},
+                                        "arguments": _tool_arguments(tc),
                                     }
                                     for tc in tool_calls
                                 ],
@@ -425,17 +456,15 @@ class BasicOrchestrator:
                     # Create tasks for parallel execution
                     async def execute_single_tool(
                         tc: Any, group_id: str
-                    ) -> tuple[str, str]:
+                    ) -> dict[str, Any]:
                         """Execute one tool, handling all errors gracefully.
 
-                        Always returns (tool_call_id, result_or_error) tuple.
+                        Returns a serializable, refs-only settled tool message.
                         Never raises - errors become error results.
                         """
                         tool_name = getattr(tc, "name", None) or tc.get("tool")
                         tool_call_id = getattr(tc, "id", None) or tc.get("id")
-                        args = (
-                            getattr(tc, "arguments", None) or tc.get("arguments") or {}
-                        )
+                        args = _tool_arguments(tc)
                         tool = tools.get(tool_name)
 
                         # Register tool with cancellation token for visibility
@@ -478,10 +507,10 @@ class BasicOrchestrator:
                                         pre_result, "tool:pre", tool_name
                                     )
                                     if pre_result.action == "deny":
-                                        return (
-                                            tool_call_id,
-                                            f"Denied by hook: {pre_result.reason}",
-                                        )
+                                        return {
+                                            "role": "tool", "tool_call_id": tool_call_id,
+                                            "content": f"Denied by hook: {pre_result.reason}",
+                                        }
 
                                 if not tool:
                                     error_msg = f"Error: Tool '{tool_name}' not found"
@@ -496,27 +525,40 @@ class BasicOrchestrator:
                                             "parallel_group_id": group_id,
                                         },
                                     )
-                                    return (tool_call_id, error_msg)
+                                    return {"role": "tool", "tool_call_id": tool_call_id,
+                                            "content": error_msg}
 
-                                result = await tool.execute(args)
+                                with dispatch_context(
+                                    coordinator, asyncio.current_task(),
+                                    tool_call_id, group_id,
+                                ):
+                                    result = await tool.execute(args)
 
-                                # Serialize result for logging
-                                result_data = result
-                                if hasattr(result, "to_dict"):
-                                    result_data = result.to_dict()
+                                # Stage canonical rich content before any model_dump
+                                # or observer sees the result. No loop-side hydration.
+                                origin = {
+                                    "kind": "tool",
+                                    "session_id": getattr(coordinator, "session_id", None)
+                                    or getattr(media, "session_id", None),
+                                    "id": tool_call_id,
+                                }
+                                result = await stage(result, media, origin)
+                                result_data = presentation(result)
+                                original_data = deepcopy(result_data)
 
                                 # Emit and process tool post (allows hooks to inject feedback)
-                                post_result = await hooks.emit(
-                                    TOOL_POST,
-                                    {
+                                post_event = {
                                         "tool_name": tool_name,
+                                        "tool_call_id": tool_call_id,
                                         "tool_input": args,
                                         "result": result_data,
                                         "parallel_group_id": group_id,
-                                    },
+                                    }
+                                post_result = await hooks.emit(
+                                    TOOL_POST, post_event,
                                 )
                                 if coordinator:
-                                    await coordinator.process_hook_result(
+                                    post_result = await coordinator.process_hook_result(
                                         post_result, "tool:post", tool_name
                                     )
 
@@ -537,28 +579,10 @@ class BasicOrchestrator:
                                         f"Stored ephemeral injection from tool:post ({tool_name}) for next iteration"
                                     )
 
-                                # Check if a hook modified the tool result.
-                                # hooks.emit() chains modify actions: when a hook
-                                # returns action="modify", the data dict is replaced.
-                                # We detect this by checking if the returned "result"
-                                # is a different object than what we originally sent.
-                                modified_result = None
-                                if post_result and post_result.data is not None:
-                                    returned_result = post_result.data.get("result")
-                                    if (
-                                        returned_result is not None
-                                        and returned_result is not result_data
-                                    ):
-                                        modified_result = returned_result
-
-                                if modified_result is not None:
-                                    if isinstance(modified_result, (dict, list)):
-                                        result_content = json.dumps(modified_result)
-                                    else:
-                                        result_content = str(modified_result)
-                                else:
-                                    result_content = result.get_serialized_output()
-                                return (tool_call_id, result_content)
+                                return await settle(
+                                    result, original_data, post_result, media,
+                                    origin, tool_call_id, post_event.get("result"),
+                                )
 
                             except Exception as te:
                                 # Emit error event
@@ -577,7 +601,8 @@ class BasicOrchestrator:
                                 # Return failure with error message (don't raise!)
                                 error_msg = f"Error executing tool: {str(te)}"
                                 logger.error(f"Tool {tool_name} failed: {te}")
-                                return (tool_call_id, error_msg)
+                                return {"role": "tool", "tool_call_id": tool_call_id,
+                                        "content": error_msg}
                         finally:
                             # Unregister tool from cancellation token
                             if coordinator:
@@ -588,133 +613,66 @@ class BasicOrchestrator:
                     # Execute all tools in parallel with asyncio.gather
                     # return_exceptions=False because we handle exceptions inside execute_single_tool
                     # Wrap in try/except for CancelledError to handle immediate cancellation
+                    tasks = [
+                        asyncio.create_task(execute_single_tool(tc, parallel_group_id))
+                        for tc in tool_calls
+                    ]
                     try:
-                        tool_results = await asyncio.gather(
-                            *[
-                                execute_single_tool(tc, parallel_group_id)
-                                for tc in tool_calls
-                            ]
-                        )
-                    except asyncio.CancelledError:
-                        # Immediate cancellation (second Ctrl+C) - synthesize cancelled results
-                        # for ALL tool_calls to maintain tool_use/tool_result pairing
+                        tool_results = await asyncio.gather(*tasks)
+                    except asyncio.CancelledError as cancelled:
+                        # Completed siblings retain their actual settled evidence.
                         logger.info(
                             "Tool execution cancelled - synthesizing cancelled results"
                         )
-                        for tc in tool_calls:
-                            if hasattr(context, "add_message"):
-                                await context.add_message(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tc.id,
-                                        "content": f'{{"error": "Tool execution was cancelled by user", "cancelled": true, "tool": "{tc.name}"}}',
-                                    }
-                                )
-                        # Emit cancel events before re-raising so hooks receive them
-                        if coordinator and not self._cancel_requested_emitted:
-                            self._cancel_requested_emitted = True
-                            await hooks.emit(
-                                CANCEL_REQUESTED,
-                                {
-                                    "orchestrator": "loop-basic",
-                                    "state": str(coordinator.cancellation.state),
-                                    "turn_count": iteration,
-                                },
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        tool_results = []
+                        for tc, task in zip(tool_calls, tasks):
+                            if task.done() and not task.cancelled() and task.exception() is None:
+                                tool_results.append(task.result())
+                            else:
+                                tool_results.append({
+                                    "role": "tool",
+                                    "tool_call_id": getattr(tc, "id", None) or tc.get("id"),
+                                    "content": json.dumps({
+                                        "error": "Tool execution was cancelled by user",
+                                        "cancelled": True,
+                                    }),
+                                })
+                        try:
+                            await self._finish_cancelled(
+                                context, hooks, coordinator, iteration, tool_results,
                             )
-                            try:
-                                await coordinator.cancellation.trigger_callbacks()
-                            except Exception as e:
-                                logger.warning(f"Error in cancellation callbacks: {e}")
-                        if coordinator:
-                            await hooks.emit(
-                                CANCEL_COMPLETED,
-                                {
-                                    "orchestrator": "loop-basic",
-                                    "was_immediate": coordinator.cancellation.is_immediate,
-                                    "turn_count": iteration,
-                                },
-                            )
-                        # Write synthetic assistant message to close the turn.
-                        # Without this, transcript has tool_results without a closing assistant
-                        # message, triggering FM3 (incomplete_assistant_turn) on resume.
-                        if hasattr(context, "add_message"):
-                            await context.add_message(
-                                {
-                                    "role": "assistant",
-                                    "content": "The previous operation was cancelled. Results from completed tools have been preserved.",
-                                }
-                            )
+                        except Exception as save_error:
+                            raise cancelled from save_error
                         # Re-raise to let the cancellation propagate
                         raise
 
                     # Check for immediate cancellation (graceful path - tools completed)
-                    if coordinator and coordinator.cancellation.is_immediate:
-                        # MUST add tool results to context before returning
-                        # Otherwise we leave orphaned tool_calls without matching tool_results
-                        # which violates provider API contracts (Anthropic, OpenAI)
-                        for tool_call_id, content in tool_results:
-                            if hasattr(context, "add_message"):
-                                await context.add_message(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call_id,
-                                        "content": content,
-                                    }
-                                )
-                        # Emit cancel:requested on first detection and trigger cleanup callbacks
-                        if not self._cancel_requested_emitted:
-                            self._cancel_requested_emitted = True
-                            await hooks.emit(
-                                CANCEL_REQUESTED,
-                                {
-                                    "orchestrator": "loop-basic",
-                                    "state": str(coordinator.cancellation.state),
-                                    "turn_count": iteration,
-                                },
-                            )
-                            try:
-                                await coordinator.cancellation.trigger_callbacks()
-                            except Exception as e:
-                                logger.warning(f"Error in cancellation callbacks: {e}")
-                        # Emit cancel:completed — orchestrator is exiting due to cancellation
-                        await hooks.emit(
-                            CANCEL_COMPLETED,
-                            {
-                                "orchestrator": "loop-basic",
-                                "was_immediate": coordinator.cancellation.is_immediate,
-                                "turn_count": iteration,
-                            },
+                    if self._cancelled(coordinator):
+                        await self._finish_cancelled(
+                            context, hooks, coordinator, iteration, tool_results,
                         )
-                        await hooks.emit(
-                            ORCHESTRATOR_COMPLETE,
-                            {
-                                "orchestrator": "loop-basic",
-                                "turn_count": iteration,
-                                "status": "cancelled",
-                            },
-                        )
-                        # Write synthetic assistant message to close the turn.
-                        # Without this, transcript has tool_results without a closing assistant
-                        # message, triggering FM3 (incomplete_assistant_turn) on resume.
-                        if hasattr(context, "add_message"):
-                            await context.add_message(
-                                {
-                                    "role": "assistant",
-                                    "content": "The previous operation was cancelled. Results from completed tools have been preserved.",
-                                }
-                            )
                         return final_content
 
                     # Add all tool results to context in original order (deterministic)
-                    for tool_call_id, content in tool_results:
+                    for message in tool_results:
                         if hasattr(context, "add_message"):
-                            await context.add_message(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call_id,
-                                    "content": content,
-                                }
-                            )
+                            await context.add_message(message)
+                    try:
+                        await checkpoint(coordinator, tool_results)
+                    except asyncio.CancelledError:
+                        # The host owns reconciliation of an interrupted save.
+                        # Preserve memory and cleanup, but never replay that write.
+                        await self._finish_cancelled(
+                            context, hooks, coordinator, iteration, [],
+                            save=False,
+                        )
+                        raise
+                    if self._cancelled(coordinator):
+                        await self._finish_cancelled(
+                            context, hooks, coordinator, iteration, [],
+                        )
+                        return final_content
 
                     # After executing tools, continue loop to get final response
                     iteration += 1
@@ -795,6 +753,11 @@ class BasicOrchestrator:
             and iteration >= self.max_iterations
             and not final_content
         ):
+            if self._cancelled(coordinator):
+                await self._finish_cancelled(
+                    context, hooks, coordinator, iteration, [],
+                )
+                return final_content
             logger.warning(
                 f"Max iterations ({self.max_iterations}) reached without final response"
             )
@@ -825,6 +788,11 @@ You have reached the maximum number of iterations for this turn. Please provide 
                 )
 
             # Get one final response with the reminder (context handles compaction internally)
+            if self._cancelled(coordinator):
+                await self._finish_cancelled(
+                    context, hooks, coordinator, iteration, [],
+                )
+                return final_content
             if hasattr(context, "get_messages_for_request"):
                 message_dicts = await context.get_messages_for_request(
                     provider=provider
@@ -846,7 +814,9 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
             )
 
             try:
-                messages_objects = [Message(**msg) for msg in message_dicts]
+                messages_objects = [
+                    Message(**msg) for msg in request_messages(message_dicts, media)
+                ]
 
                 # Convert tools to ToolSpec format for ChatRequest
                 tools_list = None
@@ -870,6 +840,11 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                 if self.extended_thinking:
                     kwargs["extended_thinking"] = True
 
+                if self._cancelled(coordinator):
+                    await self._finish_cancelled(
+                        context, hooks, coordinator, iteration, [],
+                    )
+                    return final_content
                 response = await provider.complete(chat_request, **kwargs)
                 content = getattr(response, "content", None)
                 content_blocks = getattr(response, "content_blocks", None)
@@ -936,6 +911,62 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
         )
 
         return final_content
+
+    @staticmethod
+    def _cancelled(coordinator):
+        return coordinator is not None and (
+            coordinator.cancellation.is_cancelled
+            or coordinator.cancellation.is_immediate
+        )
+
+    async def _finish_cancelled(
+        self, context, hooks, coordinator, iteration, messages, *, save=True,
+    ):
+        """Save paired evidence and closure; persistence failure never skips cleanup."""
+        try:
+            if hasattr(context, "add_message"):
+                for message in messages:
+                    await context.add_message(message)
+                await context.add_message({
+                    "role": "assistant",
+                    "content": (
+                        "The previous operation was cancelled. "
+                        "Results from completed tools have been preserved."
+                    ),
+                })
+            if save:
+                await checkpoint(coordinator, messages)
+        finally:
+            if coordinator and not self._cancel_requested_emitted:
+                self._cancel_requested_emitted = True
+                try:
+                    await hooks.emit(CANCEL_REQUESTED, {
+                        "orchestrator": "loop-basic",
+                        "state": str(coordinator.cancellation.state),
+                        "turn_count": iteration,
+                    })
+                except Exception:  # noqa: BLE001 - notification cannot mask save failure
+                    logger.warning("Cancellation request notification failed")
+                try:
+                    await coordinator.cancellation.trigger_callbacks()
+                except Exception:  # noqa: BLE001 - keep the primary save/cancel outcome
+                    logger.warning("Cancellation cleanup callback failed")
+            if coordinator:
+                try:
+                    await hooks.emit(CANCEL_COMPLETED, {
+                        "orchestrator": "loop-basic",
+                        "was_immediate": coordinator.cancellation.is_immediate,
+                        "turn_count": iteration,
+                    })
+                except Exception:  # noqa: BLE001 - best-effort observation
+                    logger.warning("Cancellation completion notification failed")
+            try:
+                await hooks.emit(ORCHESTRATOR_COMPLETE, {
+                    "orchestrator": "loop-basic", "turn_count": iteration,
+                    "status": "cancelled",
+                })
+            except Exception:  # noqa: BLE001 - best-effort observation
+                logger.warning("Orchestrator cancellation notification failed")
 
     def _select_provider(self, providers: dict[str, Any]) -> Any:
         """Select a provider based on priority."""
