@@ -173,6 +173,25 @@ def run_suite(name, selectors, destination):
     typed_skips = sum(row["outcome"] == "skipped" for row in execution["reports"])
     if counts["skipped"] != typed_skips:
         errors.append("JUnit/typed skip mismatch")
+    # Equal inventories and totals do not prove that the same cases skipped.
+    # Join normalized identities AND outcomes; a skip moved from an optional
+    # case onto a required case must fail even when the total stays unchanged.
+    typed_skipped_ids = {
+        row["nodeid"] for row in execution["reports"] if row["outcome"] == "skipped"
+    }
+    typed_outcomes = Counter(
+        (identity, ("skipped",) if nodeid in typed_skipped_ids else ())
+        for nodeid, identity in zip(expected, normalized)
+    )
+    junit_outcomes = Counter(
+        (identity, tuple(
+            outcome for outcome in ("failure", "error", "skipped")
+            if case.find(outcome) is not None
+        ))
+        for identity, case in zip(junit_ids, cases)
+    )
+    if junit_outcomes != typed_outcomes:
+        errors.append("JUnit outcomes do not match typed execution per node")
     return {**result, "counts": counts, "skips": skips, "errors": errors, "valid": not errors}
 
 
