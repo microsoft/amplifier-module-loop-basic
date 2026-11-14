@@ -35,6 +35,83 @@ Provides a standard, deterministic orchestration loop for AI agents. This is the
 - Event correlation: `parallel_group_id` tracks related executions
 - No streaming (see loop-streaming for that)
 
+### Experimental media references
+
+With a compatible host-bound `experimental.media.v1` capability, canonical rich
+tool images are staged before `tool:post` observers. Only the final effective
+hook output's structured `output["experimental.media.v1"] = {"refs": [...]}` is
+published. Explicit null, removal, denial, errors and JSON-looking strings cannot
+restore refs from the original result. Ordered tool messages carry admitted refs
+in the same metadata namespace, including completed siblings during cancellation.
+
+Media admission also requires the host's `session.media.tool_post` callable:
+`async boundary(event, *, hooks=None, coordinator=None)` returns
+`{hook_result: processed HookResult, result: final effective value, complete: bool}`.
+The callback owns hook emission and coordinator processing exactly once. A
+complete explicit result, including null, is authoritative over registry
+aggregate data. Missing/incomplete/malformed witnesses drop staged refs and
+record explicit unavailable text, without replaying the hook chain.
+Fail-closed media admission preserves ordinary text/status from the processed
+effective result, with the reserved media member removed. Explicit null/removal
+never recovers the original text or refs; a processed denial keeps its reason.
+
+This witness is necessary because installed Rust Core 2.0.2 can lose result data
+while aggregating injection chains, and discards unreturned in-place Python
+handler edits. A qualified host bridge must witness the full chain, including
+those mutations and errors; aggregate-only or synthetic-registry tests do not
+establish support. Without a bridge, ordinary text keeps legacy hook semantics,
+not a new universal text-redaction guarantee.
+
+The capability is structural (version 1; `ingest`, `publish`, `validate`,
+`resolve`, `prepare_request`, `report`); this module imports only Core, not
+Foundation or an application. Producers can read their actual concurrent call
+identity from the host's task-keyed `_tool_dispatch_contexts` during execution.
+Consumer readiness is reported only after a complete boundary witness, never
+merely because an unverified callable is mounted. It is an observation, not
+execution permission or producer activation.
+
+The host's existing no-argument `session.durable_checkpoint` runs after the
+settled ordered append. Ref-bearing results require that callback; `False` or an
+exception stops subsequent requests without rerunning tools. The host owns the
+exact saved-prefix acknowledgment and must refuse media preparation without an
+actual canonical commit. Cancellation saves paired results and the closing
+assistant message, and never starts a new provider request. An interrupted
+checkpoint has an unknown durable outcome: cleanup runs, in-memory evidence is
+preserved, and the host reconciles the save without the loop replaying it.
+If a child self-cancels, the loop requests cancellation of unfinished siblings
+before draining them. One shielded settlement preserves completed evidence,
+ordered synthetic cancellation rows and cleanup under repeated caller
+cancellation; it never redispatches tools or repeats an uncertain checkpoint.
+
+Both ordinary and max-iteration final `ChatRequest` objects remain reference-only.
+Install the qualified host/provider adapter on the actual selected provider,
+including context compaction/counting: the loop never resolves images or hydrates
+saved requests. Without compatible handling, canonical rich images become useful
+text plus an explicit unavailable warning, not fallback base64. Restored refs on
+an unsupported loop request receive the same warning without altering history.
+An explicitly disabled capability (`enabled=False`) uses this same optional
+text-only fallback, without ingest, publication or readiness calls. Enabled
+capability validation failures still refuse; they are not silently downgraded.
+
+This is an experimental integration boundary, not a claim of visual inference,
+exact image-budget accounting, store durability or host/provider parity. Those
+require qualification against the accepted Foundation and host/provider graph.
+
+Optional candidate pairing checks in `tests/test_media_f1_pairing.py` require
+`AMPLIFIER_MEDIA_F1_SOURCE` pointing to an exact exported Foundation tree, with
+that root first on `PYTHONPATH`. They use the actual store, source-sealed legacy
+checkpoint and private provider wrapper; without that explicit setup they skip.
+Their synthetic complete hook witness is not real-registry bridge qualification.
+Publication happens once per settled origin: retain the surviving ref set, or
+drop the complete staged set. Removed refs are handled by that same publication.
+The separate `safe-*` cases require `AMPLIFIER_MEDIA_HOOK_BRIDGE_SOURCE` pointing
+to an exact bridge export. They invoke only the helper's public installer and
+callback with actual Core HookRegistry. The initial safe bridge deliberately
+returns `complete=False/result=None` for every call: these checks prove no
+double emission/processing, no media promotion, and retained useful text/status
+on that negative path. They do not prove positive image delivery or authorize
+activation. No runtime module may use the helper's private partial-witness seam.
+
 ## Configuration
 
 ```toml
