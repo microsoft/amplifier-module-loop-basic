@@ -93,6 +93,28 @@ An explicitly disabled capability (`enabled=False`) uses this same optional
 text-only fallback, without ingest, publication or readiness calls. Enabled
 capability validation failures still refuse; they are not silently downgraded.
 
+### Final-candidate budgeting
+
+Both ordinary completion and the max-iteration completion call an optional
+provider `request_budget` **after** constructing the final canonical request:
+tools, reasoning effort, ephemeral additions and the final reminder are included.
+The counted object is the unchanged object sent to `complete`, with the same
+effective options. An earlier context-only count is not that final count.
+Nonempty options require an explicit named `request_options` parameter; a
+`**kwargs` catch-all is not a compatibility claim. There is no TypeError retry.
+
+Provider results keep their owner-defined fields. Known token fields reject
+booleans, negative values and non-integers; a declared input limit must be
+positive and not below the estimated input. A measured media decision additionally
+requires the actual `provider_count` record and matching projection witness.
+No locally guessed cost or estimate-only result is called a measured image fit.
+Media without measured counting requires the host's
+`media_text_fallback_witness` for an exact warning-only private candidate, or
+fails before dispatch. Such a fallback is not a numeric budget or visual
+inference claim. Plain text retains legacy missing-count behavior. Validation
+failure or request/options mutation stops dispatch without replaying tools or
+silently sending a different candidate.
+
 This is an experimental integration boundary, not a claim of visual inference,
 exact image-budget accounting, store durability or host/provider parity. Those
 require qualification against the accepted Foundation and host/provider graph.

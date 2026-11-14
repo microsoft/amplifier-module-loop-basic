@@ -151,6 +151,17 @@ class Provider:
         self.requests = []
         self.coordinator = coordinator
 
+    async def request_budget(self, request, *, request_options=None):
+        return {
+            "estimated_input_tokens": 10, "input_limit_tokens": 1000,
+            "context_token_budget": 1000,
+            "measurement": {"kind": "provider_count", "source": "synthetic", "input_tokens": 10},
+        }
+
+    def media_budget_witness(self, request, *, request_options=None):
+        # Structural unit sentinel, not actual provider measurement qualification.
+        return {"v": 1, "validated": True, "projection_digest": "a" * 64}
+
     async def complete(self, request, **kwargs):
         saved = request.model_dump()
         assert PIXELS not in json.dumps(saved)

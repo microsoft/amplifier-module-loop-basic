@@ -40,6 +40,7 @@ from ._media import (
     settle,
     stage,
 )
+from ._request_budget import RequestBudgetError, check_final_request
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +326,12 @@ class BasicOrchestrator:
                     kwargs = {}
                     if self.extended_thinking:
                         kwargs["extended_thinking"] = True
+                    await check_final_request(provider, chat_request, kwargs)
+                    if self._cancelled(coordinator):
+                        await self._finish_cancelled(
+                            context, hooks, coordinator, iteration, [],
+                        )
+                        return final_content
                     response = await provider.complete(chat_request, **kwargs)
 
                     # Check for immediate cancellation after provider returns
@@ -878,6 +885,7 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                 kwargs = {}
                 if self.extended_thinking:
                     kwargs["extended_thinking"] = True
+                await check_final_request(provider, chat_request, kwargs)
 
                 if self._cancelled(coordinator):
                     await self._finish_cancelled(
@@ -910,6 +918,8 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                             assistant_msg["metadata"] = response.metadata
                         await context.add_message(assistant_msg)
 
+            except RequestBudgetError:
+                raise
             except LLMError as e:
                 await hooks.emit(
                     PROVIDER_ERROR,

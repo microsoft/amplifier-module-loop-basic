@@ -81,7 +81,14 @@ async def test_actual_f1_store_checkpoint_and_private_request(tmp_path, max_iter
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     safe_bridge = disposition.startswith("safe-")
-    context = MockContextManager()
+    class PreliminaryCountingContext(MockContextManager):
+        async def _get_messages_for_request(self, token_budget=None, provider=None):
+            from amplifier_core.message_models import ChatRequest, Message
+            preliminary = ChatRequest(messages=[Message(**m) for m in self.messages])
+            await provider.request_budget(preliminary, request_options={})
+            return deepcopy(self.messages)
+
+    context = PreliminaryCountingContext()
     hooks = HookRegistry() if safe_bridge else EventRecorder()
     counts, observed = {"emit": 0, "process": 0, "checkpoint": 0}, []
     store = SessionMediaStore(
@@ -158,11 +165,30 @@ async def test_actual_f1_store_checkpoint_and_private_request(tmp_path, max_iter
     class Transport:
         name, config, default_model = "fixture", {}, "fixture-model"
         calls = 0
+        counted = None
+        counted_snapshot = None
+        counted_options = None
 
         def get_media_request_support(self, *, model, request_options=None):
             return {"v": 1, "positions": ["tool"], "mime_types": ["image/png"]}
 
+        async def request_budget(self, request, *, request_options=None):
+            cap.validate(request, purpose="count", request_options=request_options)
+            self.counted = request
+            self.counted_snapshot = request.model_dump()
+            self.counted_options = deepcopy(request_options)
+            return {
+                "estimated_input_tokens": 10, "input_limit_tokens": 1000,
+                "context_token_budget": 1000,
+                "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 10},
+            }
+
         async def complete(self, request, **kwargs):
+            assert self.counted is request
+            assert self.counted_snapshot == request.model_dump()
+            assert self.counted_options == kwargs == {"extended_thinking": True}
+            assert request.tools[0].name == "observe"
+            assert request.reasoning_effort == "high"
             cap.validate(request, purpose="transport", request_options=kwargs)
             self.calls += 1
             for message in request.messages:
@@ -237,7 +263,9 @@ async def test_actual_f1_store_checkpoint_and_private_request(tmp_path, max_iter
         if disposition == "safe-null-inject":
             bridge.hooks.register("tool:post", injection, priority=10, name="injection")
     try:
-        await BasicOrchestrator({"max_iterations": max_iterations}).execute(
+        await BasicOrchestrator({
+            "max_iterations": max_iterations, "reasoning_effort": "high", "extended_thinking": True,
+        }).execute(
             "test", context, {"fixture": wrapped}, {"observe": Tool()}, hooks, coordinator,
         )
         row = next(m for m in context.messages if m["role"] == "tool")
