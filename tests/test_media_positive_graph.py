@@ -64,6 +64,8 @@ class GraphLoader:
 @pytest.mark.parametrize("case", [
     "keep", "partial", "null", "missing", "inplace", "string", "deny", "error",
     "outer-redaction", "unknown-observed", "checkpoint-failure", "alter-after-ack", "cancel",
+    "alter-on-append", "cancel-alter-on-append",
+    "continue-null-echo", "special-null-echo",
 ])
 async def test_actual_public_graph_final_count_send(tmp_path, fmt, limit, case):
     await run_graph(tmp_path, fmt, limit, case)
@@ -108,6 +110,10 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
             self.messages = deepcopy(restored or [])
 
         async def add_message(self, message):
+            if case in ("alter-on-append", "cancel-alter-on-append") and MEDIA in (
+                message.get("metadata") or {}
+            ):
+                message["metadata"][MEDIA]["refs"].reverse()
             self.messages.append(deepcopy(message))
             if message["role"] == "tool":
                 order.append("append")
@@ -208,6 +214,13 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
             return HookResult(action="modify", data={"result": value})
         if case == "null":
             return HookResult(action="modify", data={"result": None})
+        if case == "continue-null-echo":
+            return HookResult(data={"result": None})
+        if case == "special-null-echo":
+            return HookResult(
+                action="inject_context", data={"result": None},
+                context_injection="special redaction", ephemeral=True,
+            )
         if case == "missing":
             return HookResult(action="modify", data={})
         if case == "inplace":
@@ -218,7 +231,7 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
             return HookResult(action="deny", reason="fixture redaction")
         if case == "error":
             raise RuntimeError("fixture callback failure")
-        if case == "cancel":
+        if case in ("cancel", "cancel-alter-on-append"):
             core.cancellation.request_cancellation()
         return HookResult()
 
@@ -243,6 +256,8 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
             return HookResult(action="modify", data={"result": None})
         if case == "null":
             return HookResult(action="inject_context", context_injection="late qualified feedback", ephemeral=True)
+        if case in ("continue-null-echo", "special-null-echo"):
+            return HookResult(action="modify", data=data)
         return HookResult()
 
     graph.participant("host.policy").hooks.register("tool:post", outer, priority=20, name="outer")
@@ -267,7 +282,7 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
 
     core.register_capability("session.durable_checkpoint", save)
     try:
-        if case in ("checkpoint-failure", "alter-after-ack"):
+        if case in ("checkpoint-failure", "alter-after-ack", "alter-on-append", "cancel-alter-on-append"):
             with pytest.raises(RuntimeError, match="checkpoint|Settled media"):
                 await session.execute("Inspect synthetic media")
             assert len(sent) == 1

@@ -703,7 +703,7 @@ class BasicOrchestrator:
                     # Add all tool results to context in original order (deterministic)
                     for message in tool_results:
                         if hasattr(context, "add_message"):
-                            await context.add_message(message)
+                            await context.add_message(deepcopy(message))
                     try:
                         await checkpoint(coordinator, tool_results, context)
                     except asyncio.CancelledError:
@@ -992,7 +992,7 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
         try:
             if hasattr(context, "add_message"):
                 for message in messages:
-                    await context.add_message(message)
+                    await context.add_message(deepcopy(message))
                 await context.add_message({
                     "role": "assistant",
                     "content": (
