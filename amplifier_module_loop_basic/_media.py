@@ -138,21 +138,21 @@ def without_images(result):
 
 async def stage(result, cap, origin):
     if not isinstance(result, ToolResult):
-        return result
+        return result, []
     media = has_images(result) or (
         isinstance(result.output, dict) and MEDIA in result.output
     )
     if not media:
-        return result
+        return result, []
     if cap is None:
-        return without_images(result)
+        return without_images(result), []
     staged = await media_call(
         cap.ingest, result, source_format="core-tool-result", origin=origin, policy=None
     )
     value = staged["value"]
     if not isinstance(value, ToolResult) or has_images(value):
         raise ValueError("Media staging did not return a refs-only ToolResult")
-    return value
+    return value, staged["staged_refs"]
 
 
 def presentation(result):
@@ -163,7 +163,9 @@ def presentation(result):
     return result
 
 
-async def settle(original, sent, post, cap, origin, tool_call_id, current, witness):
+async def settle(
+    original, sent, post, cap, origin, tool_call_id, current, witness, staged_refs,
+):
     """Select final effective output by field presence, never object identity."""
     if post.action == "deny":
         effective = None
@@ -202,9 +204,10 @@ async def settle(original, sent, post, cap, origin, tool_call_id, current, witne
         text = "Image unavailable: the final hook result was not established; no pixels supplied."
 
     refs = refs_from(effective)
-    if cap is not None and (refs or refs_from(sent)):
+    if cap is not None and (refs or staged_refs):
         published = await media_call(
-            cap.publish, refs, origin=origin, disposition="retain" if refs else "drop"
+            cap.publish, refs if refs else staged_refs, origin=origin,
+            disposition="retain" if refs else "drop",
         )
         if published["refs"] != refs:
             raise ValueError("Media publication changed the effective refs")

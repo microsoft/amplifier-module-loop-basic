@@ -66,10 +66,12 @@ class Media:
         return {"value": referenced(refs), "staged_refs": refs}
 
     async def publish(self, refs, *, origin, disposition):
-        assert disposition == ("retain" if refs else "drop")
         assert all(item in self.staged[origin["id"]] for item in refs)
-        self.published.append((deepcopy(refs), deepcopy(origin), disposition))
-        return {"refs": deepcopy(refs), "publication": {"state": "published", "durability": "assets-only"}}
+        accepted = refs if disposition == "retain" else []
+        if disposition == "drop":
+            assert refs == self.staged[origin["id"]]
+        self.published.append((deepcopy(accepted), deepcopy(origin), disposition))
+        return {"refs": deepcopy(accepted), "publication": {"state": "published", "durability": "assets-only"}}
 
     def validate(self, value, **kwargs):
         return True
@@ -570,7 +572,7 @@ async def test_complete_witness_reports_readiness_without_granting_execution_aut
     await BasicOrchestrator({}).execute(
         "test", MockContextManager(), {"p": Provider()}, {"observe": Tool()}, Hooks(), coord,
     )
-    assert reported == [({"kind": "tool", "session_id": cap.session_id, "id": "call-a"}, {
+    assert reported == [("loop-basic", {
         "event": "consumer-ready", "outcome": "ready",
         "details": {"contract": 1, "role": "loop"},
     })]

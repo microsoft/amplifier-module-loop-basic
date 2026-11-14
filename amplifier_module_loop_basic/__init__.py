@@ -559,7 +559,7 @@ class BasicOrchestrator:
                                     or getattr(media, "session_id", None),
                                     "id": tool_call_id,
                                 }
-                                result = await stage(result, media, origin)
+                                result, staged_refs = await stage(result, media, origin)
                                 result_data = presentation(result)
                                 original_data = deepcopy(result_data)
 
@@ -580,7 +580,7 @@ class BasicOrchestrator:
                                     and "result" in witness
                                 ):
                                     await media_call(
-                                        media.report, origin, event="consumer-ready",
+                                        media.report, "loop-basic", event="consumer-ready",
                                         outcome="ready",
                                         details={"contract": 1, "role": "loop"},
                                     )
@@ -605,6 +605,7 @@ class BasicOrchestrator:
                                 return await settle(
                                     result, original_data, post_result, media,
                                     origin, tool_call_id, post_event.get("result"), witness,
+                                    staged_refs,
                                 )
 
                             except Exception as te:

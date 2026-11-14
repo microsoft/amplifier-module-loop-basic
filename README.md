@@ -91,6 +91,14 @@ This is an experimental integration boundary, not a claim of visual inference,
 exact image-budget accounting, store durability or host/provider parity. Those
 require qualification against the accepted Foundation and host/provider graph.
 
+Optional candidate pairing checks in `tests/test_media_f1_pairing.py` require
+`AMPLIFIER_MEDIA_F1_SOURCE` pointing to an exact exported Foundation tree, with
+that root first on `PYTHONPATH`. They use the actual store, source-sealed legacy
+checkpoint and private provider wrapper; without that explicit setup they skip.
+Their synthetic complete hook witness is not real-registry bridge qualification.
+Publication happens once per settled origin: retain the surviving ref set, or
+drop the complete staged set. Removed refs are handled by that same publication.
+
 ## Configuration
 
 ```toml
