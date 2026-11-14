@@ -1,0 +1,59 @@
+name: Component tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  component-tests:
+    name: Python ${{ matrix.python }} / Core 2.0.2
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    env:
+      UV_NO_PROGRESS: "1"
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install component test profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p component-test-evidence
+          python -m pip install uv==0.13.7 2>&1 | tee component-test-evidence/installer.log
+          uv venv .venv --python "$(command -v python)"
+          # Match the locked test tools, but test the published supported Core.
+          # Do not resolve the development group's moving Core Git source.
+          uv pip install --python .venv/bin/python \
+            -e . amplifier-core==2.0.2 pytest==9.0.3 pytest-asyncio==1.3.0 \
+            2>&1 | tee component-test-evidence/install.log
+          uv pip freeze --python .venv/bin/python > component-test-evidence/dependencies.txt
+      - name: Run required corrections and full maintained component suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m pytest .github/scripts/test_component_tests.py -ra \
+            --junitxml=component-test-evidence/glue.xml 2>&1 | tee component-test-evidence/glue.log
+          .venv/bin/python .github/scripts/component_tests.py component-test-evidence
+      - name: Retain component evidence, including failures and skips
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: component-tests-python-${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: component-test-evidence/
+          if-no-files-found: error
+          retention-days: 30
