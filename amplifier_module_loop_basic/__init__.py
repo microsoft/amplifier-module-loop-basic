@@ -326,7 +326,10 @@ class BasicOrchestrator:
                     kwargs = {}
                     if self.extended_thinking:
                         kwargs["extended_thinking"] = True
-                    await check_final_request(provider, chat_request, kwargs, context)
+                    await check_final_request(
+                        provider, chat_request, kwargs, context,
+                        is_cancelled=lambda: self._cancelled(coordinator),
+                    )
                     if self._cancelled(coordinator):
                         await release_final_request(provider, chat_request, kwargs)
                         await self._finish_cancelled(
@@ -891,7 +894,10 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                         context, hooks, coordinator, iteration, [],
                     )
                     return final_content
-                await check_final_request(provider, chat_request, kwargs, context)
+                await check_final_request(
+                    provider, chat_request, kwargs, context,
+                    is_cancelled=lambda: self._cancelled(coordinator),
+                )
 
                 if self._cancelled(coordinator):
                     await release_final_request(provider, chat_request, kwargs)
