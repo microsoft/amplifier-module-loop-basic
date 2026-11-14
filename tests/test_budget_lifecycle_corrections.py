@@ -184,3 +184,56 @@ async def test_local_message_estimate_strips_image_transport_not_schema_cost():
     await check_final_request(Provider(), canonical, {})
     assert 0 < seen[0] < 1000
     assert len(canonical.messages[0].content[0].source["data"]) == 100000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [-1, 0])
+async def test_release_failure_after_cancel_is_scrubbed_and_closure_runs(limit, caplog):
+    sentinel = "SECRET_IMAGE_TRANSPORT_SENTINEL"
+    cancellation = SimpleNamespace(is_cancelled=False, is_immediate=False, state="cancelled")
+    callbacks, saves, released, events, sends = [], [], [], [], []
+
+    async def cleanup():
+        callbacks.append(True)
+
+    cancellation.trigger_callbacks = cleanup
+
+    def save():
+        saves.append(True)
+        return True
+
+    class Coordinator:
+        def __init__(self):
+            self.cancellation = cancellation
+
+        def get_capability(self, name):
+            return save if name == "session.durable_checkpoint" else None
+
+        async def process_hook_result(self, result, *args):
+            return result
+
+    class Provider:
+        async def request_budget(self, candidate, *, request_options=None):
+            cancellation.is_cancelled = True
+            return {"estimated_input_tokens": 1, "input_limit_tokens": 100}
+
+        def release_media_request(self, candidate, *, request_options=None):
+            released.append(True)
+            raise ValueError(sentinel)
+
+        async def complete(self, request, **kwargs):
+            sends.append(True)
+
+    class Observer:
+        async def emit(self, event, data):
+            events.append((event, data))
+            return HookResult()
+
+    context = MockContextManager()
+    await BasicOrchestrator({"max_iterations": limit}).execute(
+        "test", context, {"p": Provider()}, {}, Observer(), Coordinator(),
+    )
+    assert sends == [] and released == callbacks == saves == [True]
+    assert context.messages[-1]["role"] == "assistant"
+    assert any(event == "cancel:completed" for event, _ in events)
+    assert sentinel not in str(events) and sentinel not in caplog.text

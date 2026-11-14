@@ -164,9 +164,13 @@ async def _text_fallback(provider, request, options):
 
 
 async def release_final_request(provider, request, options):
-    release = getattr(provider, "release_media_request", None)
-    if callable(release) and _named(release, "request_options"):
-        await invoke(release, request, request_options=deepcopy(options))
+    try:
+        release = getattr(provider, "release_media_request", None)
+        if callable(release) and _named(release, "request_options"):
+            return await invoke(release, request, request_options=deepcopy(options))
+    except Exception:  # noqa: BLE001 - preserve cancellation and scrub private cleanup errors
+        logger.warning("Refused media candidate release failed")
+    return False
 
 
 async def check_final_request(provider, request, options, context=None):
@@ -185,10 +189,7 @@ async def check_final_request(provider, request, options, context=None):
 
 
 async def _release_refused(provider, request, options):
-    try:
-        await release_final_request(provider, request, options)
-    except Exception:  # noqa: BLE001 - cleanup must not mask the actual refusal
-        logger.warning("Refused media candidate release failed")
+    await release_final_request(provider, request, options)
 
 
 async def _check_final_request(provider, request, options, context):
