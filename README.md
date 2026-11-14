@@ -85,6 +85,9 @@ cancellation; it never redispatches tools or repeats an uncertain checkpoint.
 The loop compares the ordered settled tool content/refs with canonical context
 before and after this checkpoint. A mutation at that boundary refuses subsequent
 dispatch; source sealing and continued storage authorization remain host-owned.
+The batch is checked in its original contiguous row order and placement, not
+as independently matching call IDs. Context receives copies so insertion cannot
+mutate the loop-owned expected settlement.
 
 Both ordinary and max-iteration final `ChatRequest` objects remain reference-only.
 Install the qualified host/provider adapter on the actual selected provider,
@@ -105,6 +108,13 @@ The counted object is the unchanged object sent to `complete`, with the same
 effective options. An earlier context-only count is not that final count.
 Nonempty options require an explicit named `request_options` parameter; a
 `**kwargs` catch-all is not a compatibility claim. There is no TypeError retry.
+Providers requiring `context_estimate` receive a nonnegative local text-message
+estimate in the established context rebuild coordinate. A public context
+estimator is used when available; otherwise the loop uses the documented
+message-size heuristic with image transport fields excluded. This is neither
+an image count nor a tool-schema estimate: the provider counts the final full
+request itself. No private context-module helper import or fabricated zero is
+required for ordinary text compatibility.
 
 Provider results keep their owner-defined fields. Known token fields reject
 booleans, negative values and non-integers; a declared input limit must be
@@ -121,6 +131,12 @@ silently sending a different candidate.
 provider input ceiling. For example, 100000 estimated input tokens may fit a
 267904 input limit with an 80000 context rebuild target. Provider-owned output
 reserves are not subtracted a second time by this loop.
+Local refusal or cancellation after fitting invokes an available public
+`release_media_request(exact_canonical, request_options=original_options)`.
+Only that candidate is abandoned; the shared provider is not closed, no other
+request is released, and no count or tool is replayed. Missing cleanup support
+is not a claim that a private candidate was released. Cancellation is checked
+before and after final counting on both completion paths.
 
 This is an experimental integration boundary, not a claim of visual inference,
 exact image-budget accounting, store durability or host/provider parity. Those

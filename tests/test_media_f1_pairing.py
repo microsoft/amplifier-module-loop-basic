@@ -85,7 +85,10 @@ async def test_actual_f1_store_checkpoint_and_private_request(tmp_path, max_iter
         async def _get_messages_for_request(self, token_budget=None, provider=None):
             from amplifier_core.message_models import ChatRequest, Message
             preliminary = ChatRequest(messages=[Message(**m) for m in self.messages])
-            await provider.request_budget(preliminary, request_options={})
+            await provider.request_budget(
+                preliminary, request_options={},
+                context_estimate=sum(len(str(row)) // 4 for row in self.messages),
+            )
             return deepcopy(self.messages)
 
     context = PreliminaryCountingContext()
@@ -172,7 +175,8 @@ async def test_actual_f1_store_checkpoint_and_private_request(tmp_path, max_iter
         def get_media_request_support(self, *, model, request_options=None):
             return {"v": 1, "positions": ["tool"], "mime_types": ["image/png"]}
 
-        async def request_budget(self, request, *, request_options=None):
+        async def request_budget(self, request, *, context_estimate, request_options=None):
+            assert type(context_estimate) is int and context_estimate >= 0
             cap.validate(request, purpose="count", request_options=request_options)
             self.counted = request
             self.counted_snapshot = request.model_dump()

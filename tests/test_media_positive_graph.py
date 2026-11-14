@@ -66,6 +66,7 @@ class GraphLoader:
     "outer-redaction", "unknown-observed", "checkpoint-failure", "alter-after-ack", "cancel",
     "alter-on-append", "cancel-alter-on-append",
     "continue-null-echo", "special-null-echo",
+    "budget-overflow", "cancel-after-count",
 ])
 async def test_actual_public_graph_final_count_send(tmp_path, fmt, limit, case):
     await run_graph(tmp_path, fmt, limit, case)
@@ -126,7 +127,10 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
             # Real earlier context preparation intentionally fits a DIFFERENT
             # messages-only candidate, proving the loop must refit its final one.
             preliminary = ChatRequest(messages=[Message(**row) for row in self.messages])
-            await provider.request_budget(preliminary, request_options={})
+            await provider.request_budget(
+                preliminary, request_options={},
+                context_estimate=sum(len(str(row)) // 4 for row in self.messages),
+            )
             return deepcopy(self.messages)
 
     context = Context()
@@ -154,12 +158,21 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
         def get_media_request_support(self, *, model, request_options=None):
             return {"v": 1, "positions": ["tool"], "mime_types": ["image/png", "image/jpeg"]}
 
-        async def request_budget(self, request, *, request_options=None):
+        async def request_budget(self, request, *, context_estimate, request_options=None):
+            assert type(context_estimate) is int and context_estimate >= 0
             cap.validate(request, purpose="provider-count", request_options=request_options)
             counted.append((request, request.model_dump(), deepcopy(request_options)))
             order.append("count")
+            final_media = any(
+                isinstance(message.content, list)
+                and any(getattr(block, "type", None) == "image" for block in message.content)
+                for message in request.messages
+            ) and request_options == {"extended_thinking": True}
+            if final_media and case == "cancel-after-count":
+                core.cancellation.request_cancellation()
             return {
-                "estimated_input_tokens": 100, "input_limit_tokens": 1000,
+                "estimated_input_tokens": 100,
+                "input_limit_tokens": 50 if final_media and case == "budget-overflow" else 1000,
                 "context_token_budget": 80,
                 "measurement": {"kind": "provider_count", "source": "fixture", "input_tokens": 100},
             }
@@ -181,6 +194,8 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
     adapter = MediaPreparedProvider(
         Wire(), cap, provider_identity={"provider": "fixture", "account": "fixture", "generation": 1},
         model="fixture",
+        request_scope=(lambda: bridge.request_scope())
+        if case in ("budget-overflow", "cancel-after-count") else None,
     )
     original_complete = adapter.complete
 
@@ -282,6 +297,27 @@ async def run_graph(tmp_path, fmt, limit, case, *, parent_id=None, resumed=False
 
     core.register_capability("session.durable_checkpoint", save)
     try:
+        if case in ("budget-overflow", "cancel-after-count"):
+            if case == "budget-overflow":
+                with pytest.raises(RuntimeError, match="input budget limit"):
+                    await session.execute("Inspect synthetic media")
+            else:
+                await session.execute("Inspect synthetic media")
+            assert len(sent) == 1
+            private = counted[-1][0]
+            assert private.messages == []
+            with pytest.raises(ValueError):
+                cap.validate(private, purpose="provider-count", request_options={"extended_thinking": True})
+            assert adapter.release_media_request(
+                ChatRequest.model_validate(canonical[0]), request_options={"extended_thinking": True},
+            ) is False
+            # Provider remains usable: no close/shared teardown to clean a fit.
+            core.cancellation.reset()
+            fresh = ChatRequest.model_validate(canonical[0])
+            await adapter.request_budget(fresh, context_estimate=10, request_options={"extended_thinking": True})
+            await adapter.complete(fresh, extended_thinking=True)
+            assert len(sent) == 2
+            return None
         if case in ("checkpoint-failure", "alter-after-ack", "alter-on-append", "cancel-alter-on-append"):
             with pytest.raises(RuntimeError, match="checkpoint|Settled media"):
                 await session.execute("Inspect synthetic media")

@@ -261,19 +261,21 @@ def _settled_identity(message):
     }
 
 
-async def _verify_settled(context, expected):
+async def _verify_settled(context, expected, placement=None):
     getter = getattr(context, "get_messages", None)
     current = await invoke(getter) if callable(getter) else getattr(context, "messages", None)
     if not isinstance(current, list):
         raise TypeError("Cannot verify settled media in canonical context")
-    for message in expected:
-        matches = [
-            row for row in current
-            if row.get("role") == "tool"
-            and row.get("tool_call_id") == message["tool_call_id"]
-        ]
-        if not matches or _settled_identity(matches[-1]) != message:
-            raise RuntimeError("Settled media changed across its canonical checkpoint")
+    positions = [index for index, row in enumerate(current) if row.get("role") == "tool"]
+    selected = positions[-len(expected):]
+    if (
+        len(selected) != len(expected)
+        or selected != list(range(selected[0], selected[0] + len(expected)))
+        or (placement is not None and selected != placement)
+        or [_settled_identity(current[index]) for index in selected] != expected
+    ):
+        raise RuntimeError("Ordered settled media changed across its canonical checkpoint")
+    return selected
 
 
 async def checkpoint(coordinator, messages, context=None):
@@ -281,21 +283,17 @@ async def checkpoint(coordinator, messages, context=None):
     get = getattr(coordinator, "get_capability", None)
     save = get("session.durable_checkpoint") if callable(get) else None
     media = any(MEDIA in (message.get("metadata") or {}) for message in messages)
-    expected = deepcopy([
-        _settled_identity(message) for message in messages
-        if MEDIA in (message.get("metadata") or {})
-    ])
+    expected = deepcopy([_settled_identity(message) for message in messages])
     if not callable(save):
         if media:
             raise RuntimeError("Media delivery requires a durable settled checkpoint")
         return
-    if media:
-        await _verify_settled(context, expected)
+    placement = await _verify_settled(context, expected) if media else None
     acknowledged = await invoke(save)
     if acknowledged is False or (media and acknowledged is None):
         raise RuntimeError("Durable settled checkpoint failed")
     if media:
-        await _verify_settled(context, expected)
+        await _verify_settled(context, expected, placement)
 
 
 def request_messages(messages, cap):

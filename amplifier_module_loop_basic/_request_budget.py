@@ -1,11 +1,15 @@
 """Final-candidate budget admission; no request hydration or provider imports."""
 
+import asyncio
 import inspect
 import json
+import logging
 from collections.abc import Mapping
 from copy import deepcopy
 
 from ._media import MEDIA, invoke
+
+logger = logging.getLogger(__name__)
 
 
 class RequestBudgetError(RuntimeError):
@@ -22,6 +26,47 @@ def _named(method, name):
     )
 
 
+def _accepts_context_estimate(method):
+    return _named(method, "context_estimate") or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in inspect.signature(method).parameters.values()
+    )
+
+
+def _text_blocks(content):
+    result = []
+    for block in content:
+        if not isinstance(block, dict):
+            result.append(block)
+            continue
+        if block.get("type") in ("image", "image_url", "input_image"):
+            block = {k: v for k, v in block.items() if k not in (
+                "source", "image_url", "url", "data", "file_id",
+            )}
+        elif block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+            block = {**block, "content": _text_blocks(block["content"])}
+        result.append(block)
+    return result
+
+
+async def _context_estimate(context, request):
+    # Existing context-simple coordinate is len(str(message))//4, excluding
+    # image transport. It is a text scale for compaction, NEVER a pixel count.
+    messages = [message.model_dump(exclude_none=True) for message in request.messages]
+    safe = [
+        {**message, "content": _text_blocks(message["content"])}
+        if isinstance(message.get("content"), list) else message
+        for message in messages
+    ]
+    estimator = getattr(context, "estimate_tokens", None)
+    estimate = await invoke(estimator, safe) if callable(estimator) else sum(
+        len(str(message)) // 4 for message in safe
+    )
+    if type(estimate) is not int or estimate < 0:
+        raise RequestBudgetError("Context returned an invalid token estimate")
+    return estimate
+
+
 def _fingerprint(request, options):
     return json.dumps(
         [request.model_dump(mode="json"), options],
@@ -29,10 +74,10 @@ def _fingerprint(request, options):
     )
 
 
-async def _call_with_options(method, request, options):
+async def _call_with_options(method, request, options, **extra):
     forwarded = deepcopy(options)
     before = _fingerprint(request, forwarded)
-    value = await invoke(method, request, request_options=forwarded)
+    value = await invoke(method, request, request_options=forwarded, **extra)
     if _fingerprint(request, forwarded) != before:
         raise RequestBudgetError("Final request or forwarded options changed during budgeting")
     return value
@@ -118,16 +163,35 @@ async def _text_fallback(provider, request, options):
             raise RequestBudgetError("Non-text media fallback")
 
 
-async def check_final_request(provider, request, options):
+async def release_final_request(provider, request, options):
+    release = getattr(provider, "release_media_request", None)
+    if callable(release) and _named(release, "request_options"):
+        await invoke(release, request, request_options=deepcopy(options))
+
+
+async def check_final_request(provider, request, options, context=None):
+    original_options = deepcopy(options)
     try:
-        await _check_final_request(provider, request, options)
+        await _check_final_request(provider, request, options, context)
+    except asyncio.CancelledError:
+        await _release_refused(provider, request, original_options)
+        raise
     except RequestBudgetError:
+        await _release_refused(provider, request, original_options)
         raise
     except Exception:  # noqa: BLE001 - provider count errors may contain image transport
+        await _release_refused(provider, request, original_options)
         raise RequestBudgetError("Final request budget operation refused") from None
 
 
-async def _check_final_request(provider, request, options):
+async def _release_refused(provider, request, options):
+    try:
+        await release_final_request(provider, request, options)
+    except Exception:  # noqa: BLE001 - cleanup must not mask the actual refusal
+        logger.warning("Refused media candidate release failed")
+
+
+async def _check_final_request(provider, request, options, context):
     """Count the fully assembled object, then dispatch that unchanged object.
 
     Earlier context counts exclude loop overlays/tools/options. No signature
@@ -138,12 +202,15 @@ async def _check_final_request(provider, request, options):
     method = getattr(provider, "request_budget", None)
     decision = None
     if callable(method):
+        extra = {}
+        if _accepts_context_estimate(method):
+            extra["context_estimate"] = await _context_estimate(context, request)
         if _named(method, "request_options"):
-            decision = await _call_with_options(method, request, options)
+            decision = await _call_with_options(method, request, options, **extra)
         elif options:
             raise RequestBudgetError("Provider cannot count effective request options")
         else:
-            decision = await invoke(method, request)
+            decision = await invoke(method, request, **extra)
     if _fingerprint(request, options) != before:
         raise RequestBudgetError("Final request changed while counting its budget")
     measured = _decision(decision)
