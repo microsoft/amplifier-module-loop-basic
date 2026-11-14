@@ -253,18 +253,49 @@ async def settle(
     return message
 
 
-async def checkpoint(coordinator, messages):
+def _settled_identity(message):
+    return {
+        "role": message.get("role"), "tool_call_id": message.get("tool_call_id"),
+        "content": message.get("content"),
+        MEDIA: (message.get("metadata") or {}).get(MEDIA),
+    }
+
+
+async def _verify_settled(context, expected):
+    getter = getattr(context, "get_messages", None)
+    current = await invoke(getter) if callable(getter) else getattr(context, "messages", None)
+    if not isinstance(current, list):
+        raise TypeError("Cannot verify settled media in canonical context")
+    for message in expected:
+        matches = [
+            row for row in current
+            if row.get("role") == "tool"
+            and row.get("tool_call_id") == message["tool_call_id"]
+        ]
+        if not matches or _settled_identity(matches[-1]) != message:
+            raise RuntimeError("Settled media changed across its canonical checkpoint")
+
+
+async def checkpoint(coordinator, messages, context=None):
     """Existing no-argument host checkpoint owns the exact canonical save ACK."""
     get = getattr(coordinator, "get_capability", None)
     save = get("session.durable_checkpoint") if callable(get) else None
     media = any(MEDIA in (message.get("metadata") or {}) for message in messages)
+    expected = deepcopy([
+        _settled_identity(message) for message in messages
+        if MEDIA in (message.get("metadata") or {})
+    ])
     if not callable(save):
         if media:
             raise RuntimeError("Media delivery requires a durable settled checkpoint")
         return
+    if media:
+        await _verify_settled(context, expected)
     acknowledged = await invoke(save)
     if acknowledged is False or (media and acknowledged is None):
         raise RuntimeError("Durable settled checkpoint failed")
+    if media:
+        await _verify_settled(context, expected)
 
 
 def request_messages(messages, cap):

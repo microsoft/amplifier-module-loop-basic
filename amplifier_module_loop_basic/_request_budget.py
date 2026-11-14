@@ -29,6 +29,15 @@ def _fingerprint(request, options):
     )
 
 
+async def _call_with_options(method, request, options):
+    forwarded = deepcopy(options)
+    before = _fingerprint(request, forwarded)
+    value = await invoke(method, request, request_options=forwarded)
+    if _fingerprint(request, forwarded) != before:
+        raise RequestBudgetError("Final request or forwarded options changed during budgeting")
+    return value
+
+
 def _media_input(request):
     return any(
         MEDIA in (message.metadata or {}) or (
@@ -87,7 +96,7 @@ async def _text_fallback(provider, request, options):
     method = getattr(provider, "media_text_fallback_witness", None)
     if not callable(method) or not _named(method, "request_options"):
         raise RequestBudgetError("Final media request budget is unavailable")
-    value = await invoke(method, request, request_options=deepcopy(options))
+    value = await _call_with_options(method, request, options)
     if not isinstance(value, Mapping) or set(value) != {
         "v", "validated", "projection_digest", "messages",
     } or not _witness({k: v for k, v in value.items() if k != "messages"}):
@@ -129,12 +138,12 @@ async def _check_final_request(provider, request, options):
     method = getattr(provider, "request_budget", None)
     decision = None
     if callable(method):
-        kwargs = {}
         if _named(method, "request_options"):
-            kwargs["request_options"] = deepcopy(options)
+            decision = await _call_with_options(method, request, options)
         elif options:
             raise RequestBudgetError("Provider cannot count effective request options")
-        decision = await invoke(method, request, **kwargs)
+        else:
+            decision = await invoke(method, request)
     if _fingerprint(request, options) != before:
         raise RequestBudgetError("Final request changed while counting its budget")
     measured = _decision(decision)
@@ -142,7 +151,7 @@ async def _check_final_request(provider, request, options):
         if measured:
             method = getattr(provider, "media_budget_witness", None)
             if callable(method) and _named(method, "request_options"):
-                witness = await invoke(method, request, request_options=deepcopy(options))
+                witness = await _call_with_options(method, request, options)
             else:
                 witness = decision.get(MEDIA)
             if not _witness(witness):

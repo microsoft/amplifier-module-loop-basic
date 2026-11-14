@@ -302,3 +302,32 @@ async def test_task_cancelled_count_is_not_retried_or_dispatched():
     with pytest.raises(asyncio.CancelledError):
         await check_final_request(SimpleNamespace(request_budget=count), request(), {})
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["count", "measured-witness", "text-witness"])
+async def test_forwarded_options_mutation_refuses(operation):
+    canonical = request(operation != "count")
+
+    def mutate(req, *, request_options=None):
+        request_options["extended_thinking"] = False
+        return measured()
+
+    provider = SimpleNamespace(
+        request_budget=mutate if operation == "count" else
+        lambda req, *, request_options=None: measured() if operation == "measured-witness" else None,
+        media_budget_witness=mutate,
+        media_text_fallback_witness=mutate,
+    )
+    with pytest.raises(RequestBudgetError, match="forwarded options changed"):
+        await check_final_request(provider, canonical, {"extended_thinking": True})
+
+
+@pytest.mark.asyncio
+async def test_context_target_is_not_a_second_hard_input_limit():
+    # Real provider decisions may budget more than the local rebuild target.
+    decision = measured(100000, 267904)
+    decision["context_token_budget"] = 80000
+    await check_final_request(
+        SimpleNamespace(request_budget=lambda req: decision), request(), {},
+    )

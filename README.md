@@ -82,6 +82,9 @@ If a child self-cancels, the loop requests cancellation of unfinished siblings
 before draining them. One shielded settlement preserves completed evidence,
 ordered synthetic cancellation rows and cleanup under repeated caller
 cancellation; it never redispatches tools or repeats an uncertain checkpoint.
+The loop compares the ordered settled tool content/refs with canonical context
+before and after this checkpoint. A mutation at that boundary refuses subsequent
+dispatch; source sealing and continued storage authorization remain host-owned.
 
 Both ordinary and max-iteration final `ChatRequest` objects remain reference-only.
 Install the qualified host/provider adapter on the actual selected provider,
@@ -114,6 +117,10 @@ fails before dispatch. Such a fallback is not a numeric budget or visual
 inference claim. Plain text retains legacy missing-count behavior. Validation
 failure or request/options mutation stops dispatch without replaying tools or
 silently sending a different candidate.
+`context_token_budget` remains a validated local rebuild target, not a second
+provider input ceiling. For example, 100000 estimated input tokens may fit a
+267904 input limit with an 80000 context rebuild target. Provider-owned output
+reserves are not subtracted a second time by this loop.
 
 This is an experimental integration boundary, not a claim of visual inference,
 exact image-budget accounting, store durability or host/provider parity. Those
@@ -133,6 +140,16 @@ returns `complete=False/result=None` for every call: these checks prove no
 double emission/processing, no media promotion, and retained useful text/status
 on that negative path. They do not prove positive image delivery or authorize
 activation. No runtime module may use the helper's private partial-witness seam.
+
+`tests/test_media_positive_graph.py` is a separate opt-in profile selected by
+`AMPLIFIER_MEDIA_POSITIVE_SOURCE` and its exact exported Foundation root first on
+`PYTHONPATH`. It constructs actual Core sessions through declared cooperative
+module mounts, late participant registrations and the public final graph seal.
+PNG/JPEG fixtures exercise canonical settled acknowledgment, private count/send
+identity and redaction/refusal controls at main/final boundaries, plus fresh
+parent-linked and resumed coordinators. This bounded synthetic graph is not
+CLI/Unified integration, native/third-party registration coverage, live inference,
+an accepted dependency graph or release/adoption approval.
 
 ## Configuration
 

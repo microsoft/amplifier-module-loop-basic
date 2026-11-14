@@ -705,7 +705,7 @@ class BasicOrchestrator:
                         if hasattr(context, "add_message"):
                             await context.add_message(message)
                     try:
-                        await checkpoint(coordinator, tool_results)
+                        await checkpoint(coordinator, tool_results, context)
                     except asyncio.CancelledError:
                         # The host owns reconciliation of an interrupted save.
                         # Preserve memory and cleanup, but never replay that write.
@@ -897,7 +897,14 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                 content_blocks = getattr(response, "content_blocks", None)
 
                 if content:
-                    final_content = content
+                    if isinstance(content, list):
+                        final_content = "\n\n".join(
+                            block.text for block in content
+                            if getattr(block, "type", None) == "text"
+                            and isinstance(getattr(block, "text", None), str)
+                        )
+                    else:
+                        final_content = content
                     if hasattr(context, "add_message"):
                         # Store structured content from response.content (our Pydantic models)
                         response_content = getattr(response, "content", None)
@@ -994,7 +1001,7 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
                     ),
                 })
             if save:
-                await checkpoint(coordinator, messages)
+                await checkpoint(coordinator, messages, context)
         finally:
             if coordinator and not self._cancel_requested_emitted:
                 self._cancel_requested_emitted = True
