@@ -288,3 +288,87 @@ async def test_actual_f1_store_checkpoint_and_private_request(tmp_path, max_iter
     finally:
         wrapped.close()
         store.close()
+
+
+@pytest.mark.parametrize("max_iterations", [-1, 1])
+@pytest.mark.parametrize("kind", ["rich", "refs", "text"])
+async def test_actual_disabled_f1_capability_uses_text_fallback_without_store_io(
+    max_iterations, kind,
+):
+    from amplifier_foundation.session.media import SessionMediaCapability
+
+    from amplifier_module_loop_basic._media import UNAVAILABLE
+
+    class NoStoreAccess:
+        session_id = "disabled-session"
+
+        def __getattr__(self, name):
+            raise AssertionError(f"disabled store operation: {name}")
+
+    cap = SessionMediaCapability(NoStoreAccess(), enabled=False)
+    forbidden, messages = [], MockContextManager()
+    cap.ingest = cap.publish = cap.report = lambda *a, **kw: forbidden.append(True)
+    sentinel = "U0VFRF9QSVhFTF9TRU5USU5FTA=="
+    result = ToolResult(output="useful output")
+    if kind == "rich":
+        result.content = [
+            TextBlock(text="useful rich text"),
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": sentinel,
+            }},
+        ]
+    elif kind == "refs":
+        result.output = {"label": "useful ref text", MEDIA: {"refs": [{"unowned": True}]}}
+
+    class Coordinator:
+        cancellation = SimpleNamespace(
+            is_cancelled=False, is_immediate=False,
+            register_tool_start=lambda *a: None, register_tool_complete=lambda *a: None,
+        )
+
+        def get_capability(self, name):
+            return cap if name == MEDIA else None
+
+        async def process_hook_result(self, result, *args):
+            return result
+
+    class Tool:
+        name, description, input_schema = "observe", "fixture", {}
+
+        async def execute(self, args):
+            return result
+
+    class Provider:
+        calls = 0
+
+        async def complete(self, request, **kwargs):
+            self.calls += 1
+            assert sentinel not in request.model_dump_json()
+            return ChatResponse(
+                content=[TextBlock(text="observe" if self.calls == 1 else "done")],
+                tool_calls=[ToolCall(id="actual", name="observe", arguments={})]
+                if self.calls == 1 else None,
+            )
+
+    hooks = HookRegistry()
+    observed = []
+
+    async def observe(event, data):
+        observed.append(deepcopy(data))
+        return HookResult()
+
+    hooks.register("tool:post", observe, name="observe")
+    await BasicOrchestrator({"max_iterations": max_iterations}).execute(
+        "test", messages, {"p": Provider()}, {"observe": Tool()}, hooks, Coordinator(),
+    )
+    row = next(m for m in messages.messages if m["role"] == "tool")
+    assert "metadata" not in row
+    assert not forbidden
+    assert sentinel not in json.dumps([messages.messages, observed], default=str)
+    if kind == "text":
+        assert row["content"] == "useful output"
+    else:
+        assert UNAVAILABLE in row["content"] and "useful" in row["content"]
+        assert MEDIA not in row["content"]
+        if kind == "rich":
+            assert "useful rich text" in row["content"]

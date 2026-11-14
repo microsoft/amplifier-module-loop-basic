@@ -56,6 +56,7 @@ def capability(coordinator):
     cap = get(MEDIA) if callable(get) else None
     if (
         cap is not None
+        and getattr(cap, "enabled", None) is not False
         and type(getattr(cap, "version", None)) is int
         and cap.version == 1
         and all(
@@ -144,7 +145,7 @@ async def stage(result, cap, origin):
     )
     if not media:
         return result, []
-    if cap is None:
+    if cap is None or getattr(cap, "enabled", None) is False:
         return without_images(result), []
     staged = await media_call(
         cap.ingest, result, source_format="core-tool-result", origin=origin, policy=None

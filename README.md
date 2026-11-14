@@ -89,6 +89,9 @@ including context compaction/counting: the loop never resolves images or hydrate
 saved requests. Without compatible handling, canonical rich images become useful
 text plus an explicit unavailable warning, not fallback base64. Restored refs on
 an unsupported loop request receive the same warning without altering history.
+An explicitly disabled capability (`enabled=False`) uses this same optional
+text-only fallback, without ingest, publication or readiness calls. Enabled
+capability validation failures still refuse; they are not silently downgraded.
 
 This is an experimental integration boundary, not a claim of visual inference,
 exact image-budget accounting, store durability or host/provider parity. Those
