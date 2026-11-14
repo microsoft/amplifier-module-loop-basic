@@ -173,10 +173,10 @@ async def release_final_request(provider, request, options):
     return False
 
 
-async def check_final_request(provider, request, options, context=None):
+async def check_final_request(provider, request, options, context=None, *, is_cancelled=None):
     original_options = deepcopy(options)
     try:
-        await _check_final_request(provider, request, options, context)
+        await _check_final_request(provider, request, options, context, is_cancelled)
     except asyncio.CancelledError:
         await _release_refused(provider, request, original_options)
         raise
@@ -192,7 +192,7 @@ async def _release_refused(provider, request, options):
     await release_final_request(provider, request, options)
 
 
-async def _check_final_request(provider, request, options, context):
+async def _check_final_request(provider, request, options, context, is_cancelled):
     """Count the fully assembled object, then dispatch that unchanged object.
 
     Earlier context counts exclude loop overlays/tools/options. No signature
@@ -206,6 +206,11 @@ async def _check_final_request(provider, request, options, context):
         extra = {}
         if _accepts_context_estimate(method):
             extra["context_estimate"] = await _context_estimate(context, request)
+        # Public estimators may await and signal cooperative cancellation without
+        # cancelling this task. Return to the loop's existing release/settlement
+        # path before either provider budget invocation can begin.
+        if is_cancelled is not None and is_cancelled():
+            return
         if _named(method, "request_options"):
             decision = await _call_with_options(method, request, options, **extra)
         elif options:
