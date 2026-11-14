@@ -51,6 +51,9 @@ The callback owns hook emission and coordinator processing exactly once. A
 complete explicit result, including null, is authoritative over registry
 aggregate data. Missing/incomplete/malformed witnesses drop staged refs and
 record explicit unavailable text, without replaying the hook chain.
+Fail-closed media admission preserves ordinary text/status from the processed
+effective result, with the reserved media member removed. Explicit null/removal
+never recovers the original text or refs; a processed denial keeps its reason.
 
 This witness is necessary because installed Rust Core 2.0.2 can lose result data
 while aggregating injection chains, and discards unreturned in-place Python
@@ -98,6 +101,13 @@ checkpoint and private provider wrapper; without that explicit setup they skip.
 Their synthetic complete hook witness is not real-registry bridge qualification.
 Publication happens once per settled origin: retain the surviving ref set, or
 drop the complete staged set. Removed refs are handled by that same publication.
+The separate `safe-*` cases require `AMPLIFIER_MEDIA_HOOK_BRIDGE_SOURCE` pointing
+to an exact bridge export. They invoke only the helper's public installer and
+callback with actual Core HookRegistry. The initial safe bridge deliberately
+returns `complete=False/result=None` for every call: these checks prove no
+double emission/processing, no media promotion, and retained useful text/status
+on that negative path. They do not prove positive image delivery or authorize
+activation. No runtime module may use the helper's private partial-witness seam.
 
 ## Configuration
 

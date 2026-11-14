@@ -200,8 +200,27 @@ async def settle(
     # incomplete or malformed witnesses fail closed even if they contain refs.
     complete = witness.get("complete") is True and "result" in witness
     if not complete and (refs_from(sent) or refs_from(effective)):
+        if post.action != "deny":
+            # Media acceptance is closed, not ordinary useful text delivery.
+            # Use only the processed effective value already selected above:
+            # never recover redacted text or refs from the original result.
+            if effective is not None:
+                safe = deepcopy(effective)
+                if isinstance(safe, dict) and isinstance(safe.get("output"), dict):
+                    safe["output"].pop(MEDIA, None)
+                if isinstance(safe, dict) and "output" in safe:
+                    text = ToolResult(
+                        success=safe.get("success", True), output=safe["output"],
+                        error=safe.get("error"),
+                    ).get_serialized_output()
+                    for block in safe.get("content") or []:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = f"{text}\n\n{block.get('text', '')}"
+                else:
+                    text = json.dumps(safe) if isinstance(safe, (dict, list)) else str(safe)
+            warning = "Image unavailable: the final hook result was not established; no pixels supplied."
+            text = f"{text}\n\n{warning}" if text and text != warning else warning
         effective = None
-        text = "Image unavailable: the final hook result was not established; no pixels supplied."
 
     refs = refs_from(effective)
     if cap is not None and (refs or staged_refs):
