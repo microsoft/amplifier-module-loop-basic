@@ -189,6 +189,11 @@ async def settle(original, sent, post, cap, origin, tool_call_id, current, witne
         effective = current
         text = None
 
+    if has_images(effective):
+        raise ValueError("Post-hook images must be staged by their producing owner")
+    if isinstance(effective, ToolResult):
+        effective = effective.model_dump()
+
     # Registry aggregate data cannot witness the complete handler chain. Missing,
     # incomplete or malformed witnesses fail closed even if they contain refs.
     complete = witness.get("complete") is True and "result" in witness
@@ -196,10 +201,6 @@ async def settle(original, sent, post, cap, origin, tool_call_id, current, witne
         effective = None
         text = "Image unavailable: the final hook result was not established; no pixels supplied."
 
-    if has_images(effective):
-        raise ValueError("Post-hook images must be staged by their producing owner")
-    if isinstance(effective, ToolResult):
-        effective = effective.model_dump()
     refs = refs_from(effective)
     if cap is not None and (refs or refs_from(sent)):
         published = await media_call(

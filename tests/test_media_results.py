@@ -991,3 +991,24 @@ async def test_complete_witness_result_authoritative_over_processed_aggregate(ef
     assert "metadata" not in row and MEDIA not in row["content"]
     assert cap.published[0][0] == []
     assert len(hooks.get_events("tool:post")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("complete", [False, True])
+async def test_incomplete_witness_cannot_admit_typed_toolresult_refs(complete):
+    cap, context, hooks = Media(), MockContextManager(), Hooks()
+    coord = Coordinator(cap)
+
+    async def boundary(event, *, hooks=None, coordinator=None):
+        # A pre-staged nested producer could return a typed Core result.
+        post = HookResult(data={"result": referenced([A])})
+        return {"hook_result": post, "complete": complete}
+
+    coord.post_boundary = boundary
+    await BasicOrchestrator({}).execute(
+        "test", context, {"p": Provider()},
+        {"observe": Tool(ToolResult(output="ordinary text"))}, hooks, coord,
+    )
+    row = next(m for m in context.messages if m["role"] == "tool")
+    assert "metadata" not in row and MEDIA not in row["content"]
+    assert not [refs for refs, _, _ in cap.published if refs]
