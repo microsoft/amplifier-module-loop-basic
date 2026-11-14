@@ -6,9 +6,10 @@ from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any
 
-from amplifier_core import ToolResult
+from amplifier_core import HookResult, ToolResult
 
 MEDIA = "experimental.media.v1"
+TOOL_POST_BOUNDARY = "session.media.tool_post"
 UNAVAILABLE = (
     "Image unavailable to this session: compatible media handling is not installed; "
     "no pixels were sent."
@@ -64,6 +65,31 @@ def capability(coordinator):
     ):
         return cap
     return None
+
+
+def tool_post_boundary(coordinator):
+    get = getattr(coordinator, "get_capability", None)
+    boundary = get(TOOL_POST_BOUNDARY) if callable(get) else None
+    return boundary if callable(boundary) else None
+
+
+async def emit_tool_post(event, hooks, coordinator):
+    """The host witness owns emit + coordinator processing exactly once."""
+    boundary = tool_post_boundary(coordinator)
+    if boundary is not None:
+        witnessed = await media_call(
+            boundary, event, hooks=hooks, coordinator=coordinator,
+        )
+        if not isinstance(witnessed, dict) or not isinstance(
+            witnessed.get("hook_result"), HookResult,
+        ):
+            # Never replay an already-attempted hook chain for recovery.
+            return HookResult(), {"complete": False}
+        return witnessed["hook_result"], witnessed
+    post = await hooks.emit("tool:post", event)
+    if coordinator:
+        post = await coordinator.process_hook_result(post, "tool:post", event["tool_name"])
+    return post, {"complete": False}
 
 
 def refs_from(value):
@@ -137,20 +163,38 @@ def presentation(result):
     return result
 
 
-async def settle(original, sent, post, cap, origin, tool_call_id, current):
+async def settle(original, sent, post, cap, origin, tool_call_id, current, witness):
     """Select final effective output by field presence, never object identity."""
     if post.action == "deny":
         effective = None
         text = f"Denied by hook: {post.reason}"
-    elif isinstance(post.data, dict) and "result" in post.data:
-        effective = post.data["result"]
+    elif witness.get("complete") is True and "result" in witness:
+        effective = witness["result"]
+        text = None
+    elif isinstance(post.data, dict):
+        # Core may aggregate modify(data={}) as continue(data={}).
+        # Field removal is still authoritative, regardless of aggregate action.
+        effective = post.data.get("result")
         text = None
     elif post.action == "modify":
         effective = None
         text = "None"
+    elif refs_from(sent):
+        # Core can aggregate a redaction followed by injection into a result
+        # without data. It is indistinguishable from injection alone: never
+        # reconstruct the image-bearing result from the pre-hook event.
+        effective = None
+        text = "Image unavailable: the final hook result was not established; no pixels supplied."
     else:
         effective = current
         text = None
+
+    # Registry aggregate data cannot witness the complete handler chain. Missing,
+    # incomplete or malformed witnesses fail closed even if they contain refs.
+    complete = witness.get("complete") is True and "result" in witness
+    if not complete and (refs_from(sent) or refs_from(effective)):
+        effective = None
+        text = "Image unavailable: the final hook result was not established; no pixels supplied."
 
     if has_images(effective):
         raise ValueError("Post-hook images must be staged by their producing owner")

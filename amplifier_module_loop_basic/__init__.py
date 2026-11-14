@@ -5,6 +5,7 @@ Basic orchestrator with complete event emissions (desired state).
 # Amplifier module metadata
 __amplifier_module_type__ = "orchestrator"
 
+import asyncio
 import json
 import logging
 from copy import deepcopy
@@ -23,7 +24,6 @@ from amplifier_core.events import (
     PROVIDER_REQUEST,
     PROVIDER_RESPONSE,
     TOOL_ERROR,
-    TOOL_POST,
     TOOL_PRE,
 )
 from amplifier_core.llm_errors import LLMError
@@ -33,6 +33,7 @@ from ._media import (
     capability,
     checkpoint,
     dispatch_context,
+    emit_tool_post,
     media_call,
     presentation,
     request_messages,
@@ -49,16 +50,33 @@ def _tool_arguments(call):
             else getattr(call, "arguments", None)) or {}
 
 
+async def _await_settlement(operation, *, propagate_cancel=False):
+    """Finish one owned settlement despite repeated caller cancellation.
+
+    Shielding does not start another tool or repeat a checkpoint. The original
+    caller re-raises cancellation after this exact operation settles.
+    """
+    task = asyncio.create_task(operation)
+    interrupted = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            interrupted = True
+            # A caller may cancel repeatedly while siblings release handles or
+            # paired evidence is being saved. Do not abandon that owned task.
+            if task.done():
+                break
+    result = task.result()
+    if interrupted and propagate_cancel:
+        raise asyncio.CancelledError()
+    return result
+
+
 async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = None):
     config = config or {}
     orchestrator = BasicOrchestrator(config)
     await coordinator.mount("orchestrator", orchestrator)
-    media = capability(coordinator)
-    if media is not None:
-        await media_call(
-            media.report, None, event="consumer-ready", outcome="ready",
-            details={"contract": 1, "role": "loop"},
-        )
     logger.info("Mounted BasicOrchestrator (desired-state)")
     return
 
@@ -447,7 +465,6 @@ class BasicOrchestrator:
                         await context.add_message(assistant_msg)
 
                     # Execute tools in parallel (user guidance: assume parallel intent when multiple tool calls)
-                    import asyncio
                     import uuid
 
                     # Generate parallel group ID for event correlation
@@ -554,12 +571,18 @@ class BasicOrchestrator:
                                         "result": result_data,
                                         "parallel_group_id": group_id,
                                     }
-                                post_result = await hooks.emit(
-                                    TOOL_POST, post_event,
+                                post_result, witness = await emit_tool_post(
+                                    post_event, hooks, coordinator,
                                 )
-                                if coordinator:
-                                    post_result = await coordinator.process_hook_result(
-                                        post_result, "tool:post", tool_name
+                                if (
+                                    media is not None
+                                    and witness.get("complete") is True
+                                    and "result" in witness
+                                ):
+                                    await media_call(
+                                        media.report, origin, event="consumer-ready",
+                                        outcome="ready",
+                                        details={"contract": 1, "role": "loop"},
                                     )
 
                                 # Store ephemeral injection from tool:post for next iteration
@@ -581,7 +604,7 @@ class BasicOrchestrator:
 
                                 return await settle(
                                     result, original_data, post_result, media,
-                                    origin, tool_call_id, post_event.get("result"),
+                                    origin, tool_call_id, post_event.get("result"), witness,
                                 )
 
                             except Exception as te:
@@ -617,31 +640,46 @@ class BasicOrchestrator:
                         asyncio.create_task(execute_single_tool(tc, parallel_group_id))
                         for tc in tool_calls
                     ]
+                    batch = asyncio.gather(*tasks)
                     try:
-                        tool_results = await asyncio.gather(*tasks)
+                        # Own cancellation explicitly: repeated parent cancel
+                        # must not repeatedly cancel a child's cleanup/finally.
+                        tool_results = await asyncio.shield(batch)
                     except asyncio.CancelledError as cancelled:
                         # Completed siblings retain their actual settled evidence.
                         logger.info(
                             "Tool execution cancelled - synthesizing cancelled results"
                         )
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                        tool_results = []
-                        for tc, task in zip(tool_calls, tasks):
-                            if task.done() and not task.cancelled() and task.exception() is None:
-                                tool_results.append(task.result())
-                            else:
-                                tool_results.append({
-                                    "role": "tool",
-                                    "tool_call_id": getattr(tc, "id", None) or tc.get("id"),
-                                    "content": json.dumps({
-                                        "error": "Tool execution was cancelled by user",
-                                        "cancelled": True,
-                                    }),
-                                })
-                        try:
+                        # gather does not cancel siblings when one child
+                        # self-cancels. Request cancellation before draining.
+                        for task in tasks:
+                            if not task.done() and not task.cancelling():
+                                task.cancel()
+
+                        async def settle_cancelled_batch():
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                            # Consume the original gather outcome too; it is
+                            # never abandoned or restarted after cancellation.
+                            await asyncio.gather(batch, return_exceptions=True)
+                            tool_results = []
+                            for tc, task in zip(tool_calls, tasks):
+                                if task.done() and not task.cancelled() and task.exception() is None:
+                                    tool_results.append(task.result())
+                                else:
+                                    tool_results.append({
+                                        "role": "tool",
+                                        "tool_call_id": getattr(tc, "id", None) or tc.get("id"),
+                                        "content": json.dumps({
+                                            "error": "Tool execution was cancelled",
+                                            "cancelled": True,
+                                        }),
+                                    })
                             await self._finish_cancelled(
                                 context, hooks, coordinator, iteration, tool_results,
                             )
+
+                        try:
+                            await _await_settlement(settle_cancelled_batch())
                         except Exception as save_error:
                             raise cancelled from save_error
                         # Re-raise to let the cancellation propagate
@@ -663,10 +701,10 @@ class BasicOrchestrator:
                     except asyncio.CancelledError:
                         # The host owns reconciliation of an interrupted save.
                         # Preserve memory and cleanup, but never replay that write.
-                        await self._finish_cancelled(
+                        await _await_settlement(self._finish_cancelled(
                             context, hooks, coordinator, iteration, [],
                             save=False,
-                        )
+                        ))
                         raise
                     if self._cancelled(coordinator):
                         await self._finish_cancelled(
@@ -920,6 +958,16 @@ DO NOT mention this iteration limit or reminder to the user explicitly. Simply w
         )
 
     async def _finish_cancelled(
+        self, context, hooks, coordinator, iteration, messages, *, save=True,
+    ):
+        return await _await_settlement(
+            self._finish_cancelled_unshielded(
+                context, hooks, coordinator, iteration, messages, save=save,
+            ),
+            propagate_cancel=True,
+        )
+
+    async def _finish_cancelled_unshielded(
         self, context, hooks, coordinator, iteration, messages, *, save=True,
     ):
         """Save paired evidence and closure; persistence failure never skips cleanup."""

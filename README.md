@@ -44,11 +44,28 @@ published. Explicit null, removal, denial, errors and JSON-looking strings canno
 restore refs from the original result. Ordered tool messages carry admitted refs
 in the same metadata namespace, including completed siblings during cancellation.
 
+Media admission also requires the host's `session.media.tool_post` callable:
+`async boundary(event, *, hooks=None, coordinator=None)` returns
+`{hook_result: processed HookResult, result: final effective value, complete: bool}`.
+The callback owns hook emission and coordinator processing exactly once. A
+complete explicit result, including null, is authoritative over registry
+aggregate data. Missing/incomplete/malformed witnesses drop staged refs and
+record explicit unavailable text, without replaying the hook chain.
+
+This witness is necessary because installed Rust Core 2.0.2 can lose result data
+while aggregating injection chains, and discards unreturned in-place Python
+handler edits. A qualified host bridge must witness the full chain, including
+those mutations and errors; aggregate-only or synthetic-registry tests do not
+establish support. Without a bridge, ordinary text keeps legacy hook semantics,
+not a new universal text-redaction guarantee.
+
 The capability is structural (version 1; `ingest`, `publish`, `validate`,
 `resolve`, `prepare_request`, `report`); this module imports only Core, not
 Foundation or an application. Producers can read their actual concurrent call
 identity from the host's task-keyed `_tool_dispatch_contexts` during execution.
-Mount reports consumer readiness as an observation, not execution permission.
+Consumer readiness is reported only after a complete boundary witness, never
+merely because an unverified callable is mounted. It is an observation, not
+execution permission or producer activation.
 
 The host's existing no-argument `session.durable_checkpoint` runs after the
 settled ordered append. Ref-bearing results require that callback; `False` or an
@@ -58,6 +75,10 @@ actual canonical commit. Cancellation saves paired results and the closing
 assistant message, and never starts a new provider request. An interrupted
 checkpoint has an unknown durable outcome: cleanup runs, in-memory evidence is
 preserved, and the host reconciles the save without the loop replaying it.
+If a child self-cancels, the loop requests cancellation of unfinished siblings
+before draining them. One shielded settlement preserves completed evidence,
+ordered synthetic cancellation rows and cleanup under repeated caller
+cancellation; it never redispatches tools or repeats an uncertain checkpoint.
 
 Both ordinary and max-iteration final `ChatRequest` objects remain reference-only.
 Install the qualified host/provider adapter on the actual selected provider,
